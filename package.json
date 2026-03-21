@@ -1,0 +1,11 @@
+{
+    "name": "front-contagem",
+    "version": "1.0.0",
+    "description": "Frontend - Contagem de Croqui (Railway static)",
+    "scripts": {
+        "start": "serve ."
+    },
+    "dependencies": {
+        "serve": "^14.2.0"
+    }
+}
