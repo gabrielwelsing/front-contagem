@@ -1,11 +1,12 @@
 {
     "name": "front-contagem",
-    "version": "1.0.0",
-    "description": "Frontend - Contagem de Croqui (Railway static)",
+    "version": "2.0.0",
+    "description": "Frontend - Contagem de Croqui (Vanilla JS + PDF.js + jsPDF + html2canvas)",
     "scripts": {
-        "start": "serve ."
+        "start": "serve -s . -l $PORT",
+        "dev": "serve -s . -l 3000"
     },
     "dependencies": {
-        "serve": "^14.2.0"
+        "serve": "^14.2.4"
     }
 }
