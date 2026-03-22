@@ -1,5 +1,5 @@
 // ===== CONFIGURAÇÃO =====
-const API_URL = 'https://backcontagem-production.up.railway.app';
+const API_URL = 'https://back-contagem-production.up.railway.app';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 const PRECO_PROJETADO = 0.35;
@@ -155,10 +155,7 @@ function generateUnifiedPdf(images) {
 function mostrarTelaDesenho() {
     $('tela-upload').classList.add('hidden');
     $('tela-desenho').classList.remove('hidden');
-    $('cats-bar').classList.remove('hidden');
-    $('topo-bar').classList.remove('hidden');
-    $('amb-bar').classList.remove('hidden');
-    $('serv-bar').classList.remove('hidden');
+    $('hdr-row2').classList.remove('hidden');
     $('btn-voltar').classList.remove('hidden');
     $('btn-salvar').classList.remove('hidden');
 
@@ -171,10 +168,7 @@ function mostrarTelaDesenho() {
 function voltarUpload() {
     $('tela-upload').classList.remove('hidden');
     $('tela-desenho').classList.add('hidden');
-    $('cats-bar').classList.add('hidden');
-    $('topo-bar').classList.add('hidden');
-    $('amb-bar').classList.add('hidden');
-    $('serv-bar').classList.add('hidden');
+    $('hdr-row2').classList.add('hidden');
     $('btn-voltar').classList.add('hidden');
     $('btn-salvar').classList.add('hidden');
     $('file-input').value = '';
