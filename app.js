@@ -585,7 +585,7 @@ async function gerarRelatorio7Dias() {
         const topo = p.topografo || '';
         const dateStr = p.data_registro;
         if (topo && data[topo] && days.includes(dateStr)) {
-            data[topo][dateStr] += (p.postes || []).length;
+            data[topo][dateStr] += 1;
         }
     });
 
