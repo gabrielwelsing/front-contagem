@@ -121,8 +121,8 @@ async function handleUpload(e) {
             }
         }
 
-        // Generate unified PDF download (fit-to-page A4)
-        generateUnifiedPdf(allImages);
+        // Generate unified PDF download
+        try { generateUnifiedPdf(allImages); } catch(e) { console.warn('Erro ao gerar PDF unificado:', e); }
 
         // Build pages for drawing
         for (const img of allImages) {
@@ -135,6 +135,7 @@ async function handleUpload(e) {
 
 function generateUnifiedPdf(images) {
     const { jsPDF } = window.jspdf;
+    let pdf = null;
 
     images.forEach((img, i) => {
         const pxToMm = 25.4 / 96;
@@ -143,15 +144,15 @@ function generateUnifiedPdf(images) {
         const orientation = pageW >= pageH ? 'l' : 'p';
 
         if (i === 0) {
-            var pdf = new jsPDF(orientation, 'mm', [pageW, pageH]);
+            pdf = new jsPDF(orientation, 'mm', [pageW, pageH]);
         } else {
             pdf.addPage([pageW, pageH], orientation);
         }
 
-        pdf.addImage(img.data, 'PNG', 0, 0, pageW, pageH);
+        pdf.addImage(img.data, 'JPEG', 0, 0, pageW, pageH);
     });
 
-    pdf.save('Croqui_Unificado.pdf');
+    if (pdf) pdf.save('Croqui_Unificado.pdf');
 }
 
 // ===== NAVIGATION =====
