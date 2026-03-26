@@ -112,7 +112,7 @@ async function handleUpload(e) {
                     const c = document.createElement('canvas');
                     c.width = vp.width; c.height = vp.height;
                     await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-                    allImages.push({ data: c.toDataURL('image/jpeg', 0.9), w: vp.width, h: vp.height });
+                    allImages.push({ data: c.toDataURL('image/png'), w: vp.width, h: vp.height });
                 }
             } else {
                 const imgData = await readFileAsDataURL(file);
@@ -149,7 +149,7 @@ function generateUnifiedPdf(images) {
             pdf.addPage([pageW, pageH], orientation);
         }
 
-        pdf.addImage(img.data, 'JPEG', 0, 0, pageW, pageH);
+        pdf.addImage(img.data, 'PNG', 0, 0, pageW, pageH);
     });
 
     if (pdf) pdf.save('Croqui_Unificado.pdf');
