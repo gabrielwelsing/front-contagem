@@ -135,17 +135,20 @@ async function handleUpload(e) {
 
 function generateUnifiedPdf(images) {
     const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF('p', 'mm', 'a4');
-    const pageW = 210, pageH = 297, margin = 5;
-    const usableW = pageW - margin * 2, usableH = pageH - margin * 2;
 
     images.forEach((img, i) => {
-        if (i > 0) pdf.addPage();
-        const ratio = Math.min(usableW / img.w, usableH / img.h);
-        const w = img.w * ratio, h = img.h * ratio;
-        const x = margin + (usableW - w) / 2;
-        const y = margin + (usableH - h) / 2;
-        pdf.addImage(img.data, 'JPEG', x, y, w, h);
+        const pxToMm = 25.4 / 96;
+        const pageW = img.w * pxToMm;
+        const pageH = img.h * pxToMm;
+        const orientation = pageW >= pageH ? 'l' : 'p';
+
+        if (i === 0) {
+            var pdf = new jsPDF(orientation, 'mm', [pageW, pageH]);
+        } else {
+            pdf.addPage([pageW, pageH], orientation);
+        }
+
+        pdf.addImage(img.data, 'PNG', 0, 0, pageW, pageH);
     });
 
     pdf.save('Croqui_Unificado.pdf');
