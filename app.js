@@ -48,9 +48,8 @@ function init() {
     carregarConfigsEmpresa().then(() => {
         buildCatsBar();
         buildTopoBar();
-        if (currentUser && currentUser.role === 'admin_empresa') {
-            $('btn-config').classList.remove('hidden');
-        }
+        buildAmbBar();
+        buildServBar();
         carregarHistorico();
     });
 }
@@ -86,50 +85,119 @@ async function salvarConfigEmpresa(tipo, valores) {
     } catch { return false; }
 }
 
-// ===== PAINEL DE CONFIGURAÇÃO =====
-function abrirConfig() {
-    $('config-cats-list').value = CATEGORIAS.join('\n');
-    $('config-topos-list').value = TOPOGRAFOS.join('\n');
-    $('modal-config').classList.remove('hidden');
+// ===== MENU DE CONTEXTO =====
+let ctxMenu = null;
+
+function fecharMenuContexto() {
+    if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
 }
 
-function fecharConfig() {
-    $('modal-config').classList.add('hidden');
+document.addEventListener('click', fecharMenuContexto);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharMenuContexto(); });
+
+function abrirMenuContexto(e, tipo) {
+    e.preventDefault();
+    if (!currentUser || currentUser.role !== 'admin_empresa') return;
+
+    fecharMenuContexto();
+
+    const lista = tipo === 'categorias' ? CATEGORIAS
+                : tipo === 'topografos' ? TOPOGRAFOS
+                : tipo === 'ambiental'  ? AMB_OPCOES
+                : SERV_OPCOES;
+
+    const menu = document.createElement('div');
+    menu.className = 'ctx-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top  = e.clientY + 'px';
+
+    const addItem = (icon, label, fn) => {
+        const item = document.createElement('div');
+        item.className = 'ctx-item';
+        item.innerHTML = `<span class="ctx-icon">${icon}</span>${label}`;
+        item.onclick = (ev) => { ev.stopPropagation(); fecharMenuContexto(); fn(); };
+        menu.appendChild(item);
+    };
+
+    addItem('＋', 'Incluir', () => acaoIncluir(tipo));
+    addItem('✏️', 'Editar', () => acaoEditar(tipo, lista));
+    addItem('－', 'Remover', () => acaoRemover(tipo, lista));
+
+    document.body.appendChild(menu);
+    ctxMenu = menu;
 }
 
-async function salvarConfig() {
-    const novasCats = $('config-cats-list').value
-        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
-    const novosTopos = $('config-topos-list').value
-        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
+function acaoIncluir(tipo) {
+    const novo = prompt('Nome do novo item:');
+    if (!novo || !novo.trim()) return;
+    const val = novo.trim().toUpperCase();
+    const lista = obterLista(tipo);
+    if (lista.includes(val)) { alert('Item já existe.'); return; }
+    lista.push(val);
+    persistirESincronizar(tipo, lista);
+}
 
-    if (novasCats.length === 0) { alert('Categorias não pode ficar vazia.'); return; }
-    if (novosTopos.length === 0) { alert('Topógrafos não pode ficar vazio.'); return; }
+function acaoEditar(tipo, lista) {
+    const idx = escolherItem(lista, 'Editar qual item?');
+    if (idx === null) return;
+    const novo = prompt('Novo nome:', lista[idx]);
+    if (!novo || !novo.trim()) return;
+    const val = novo.trim().toUpperCase();
+    lista[idx] = val;
+    persistirESincronizar(tipo, lista);
+}
 
-    const [okCat, okTop] = await Promise.all([
-        salvarConfigEmpresa('categorias', novasCats),
-        salvarConfigEmpresa('topografos', novosTopos)
-    ]);
+function acaoRemover(tipo, lista) {
+    if (lista.length <= 1) { alert('A lista não pode ficar vazia.'); return; }
+    const idx = escolherItem(lista, 'Remover qual item?');
+    if (idx === null) return;
+    lista.splice(idx, 1);
+    persistirESincronizar(tipo, lista);
+}
 
-    if (okCat && okTop) {
-        CATEGORIAS = novasCats;
-        TOPOGRAFOS = novosTopos;
-        // Reseta seleções e reconstrói as barras
-        catsSelecionadas = [];
-        topoSelecionado = '';
-        buildCatsBar();
-        buildTopoBar();
-        fecharConfig();
-    } else {
-        alert('Erro ao salvar configurações.');
+function escolherItem(lista, titulo) {
+    const opcoes = lista.map((v, i) => `${i + 1}. ${v}`).join('\n');
+    const entrada = prompt(`${titulo}\n\n${opcoes}\n\nDigite o número:`);
+    if (!entrada) return null;
+    const idx = parseInt(entrada) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= lista.length) { alert('Número inválido.'); return null; }
+    return idx;
+}
+
+function obterLista(tipo) {
+    if (tipo === 'categorias') return CATEGORIAS;
+    if (tipo === 'topografos') return TOPOGRAFOS;
+    if (tipo === 'ambiental')  return AMB_OPCOES;
+    return SERV_OPCOES;
+}
+
+async function persistirESincronizar(tipo, lista) {
+    // Amb e Serv: só local (não persistem no banco — valores fixos do sistema)
+    if (tipo === 'ambiental' || tipo === 'servidao') {
+        rebuilBarPorTipo(tipo);
+        return;
     }
+    const ok = await salvarConfigEmpresa(tipo, lista);
+    if (!ok) { alert('Erro ao salvar no servidor.'); return; }
+    rebuilBarPorTipo(tipo);
+}
+
+function rebuilBarPorTipo(tipo) {
+    if (tipo === 'categorias') { catsSelecionadas = []; buildCatsBar(); }
+    else if (tipo === 'topografos') { topoSelecionado = ''; buildTopoBar(); }
+    else if (tipo === 'ambiental') { ambSelecionado = ''; buildAmbBar(); }
+    else if (tipo === 'servidao') { servSelecionado = ''; buildServBar(); }
 }
 
 // ===== BARRAS =====
+
+// Amb e Serv como arrays mutáveis (por sessão)
+let AMB_OPCOES  = ['SIM', 'NÃO'];
+let SERV_OPCOES = ['SST', 'SSC', 'SSTC'];
 function buildCatsBar() {
     const bar = $('cats-bar');
-    // Remove botões antigos, mantém o label
     bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'categorias');
     CATEGORIAS.forEach(cat => {
         const btn = document.createElement('button');
         btn.className = 'bar-btn';
@@ -150,6 +218,7 @@ function buildCatsBar() {
 function buildTopoBar() {
     const bar = $('topo-bar');
     bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'topografos');
     TOPOGRAFOS.forEach(name => {
         const btn = document.createElement('button');
         btn.className = 'bar-btn';
@@ -158,6 +227,40 @@ function buildTopoBar() {
             bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             topoSelecionado = name;
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function buildAmbBar() {
+    const bar = $('amb-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'ambiental');
+    AMB_OPCOES.forEach(val => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = val;
+        btn.onclick = () => {
+            ambSelecionado = val;
+            bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-green'));
+            btn.classList.add(val === 'SIM' ? 'active-green' : 'active');
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function buildServBar() {
+    const bar = $('serv-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'servidao');
+    SERV_OPCOES.forEach(val => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = val;
+        btn.onclick = () => {
+            servSelecionado = val;
+            bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-amber'));
+            btn.classList.add('active-amber');
         };
         bar.appendChild(btn);
     });
