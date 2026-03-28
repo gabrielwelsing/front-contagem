@@ -5,11 +5,17 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 const PRECO_PROJETADO = 0.35;
 const PRECO_EXISTENTE = 0.20;
 const PRECO_RURAL = 1.40;
-const CATEGORIAS = ["AC","EXT.RURAL","EXT.URB","MOD.URB","AFAST/REM","RL/BRT","PASTO","ESTRADA"];
-const TOPOGRAFOS = ["ALEX TEIXEIRA","BRUNO","CAIO","ESMENDIO","FABIANO","FREELANCER","GENIVALDO","HENRIQUE","JUNIOR","KENEDY","MAURICIO","MAURO"];
+
+// Defaults (usados se não houver config salva para a empresa)
+const CATEGORIAS_DEFAULT = ["AC","EXT.RURAL","EXT.URB","MOD.URB","AFAST/REM","RL/BRT","PASTO","ESTRADA"];
+const TOPOGRAFOS_DEFAULT = ["ALEX TEIXEIRA","BRUNO","CAIO","ESMENDIO","FABIANO","FREELANCER","GENIVALDO","HENRIQUE","JUNIOR","KENEDY","MAURICIO","MAURO"];
+
+// Configs ativas (carregadas da API ou default)
+let CATEGORIAS = [...CATEGORIAS_DEFAULT];
+let TOPOGRAFOS = [...TOPOGRAFOS_DEFAULT];
 
 // ===== ESTADO =====
-let pages = [];       // [{imgData: base64, postes: [{x,y,tipo}]}]
+let pages = [];
 let currentPage = 0;
 let zoom = 1;
 let catsSelecionadas = [];
@@ -17,6 +23,9 @@ let topoSelecionado = '';
 let ambSelecionado = '';
 let servSelecionado = '';
 let historico = [];
+
+// Dados do usuário logado (extraídos do JWT)
+let currentUser = null;
 
 // ===== DOM =====
 const $ = id => document.getElementById(id);
@@ -26,13 +35,101 @@ function init() {
     $('ns-input').addEventListener('input', function() {
         this.classList.toggle('valid', this.value.length === 10);
     });
-    buildCatsBar();
-    buildTopoBar();
-    carregarHistorico();
+
+    // Extrai dados do usuário do JWT salvo
+    const token = localStorage.getItem('hub_token');
+    if (token) {
+        try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            currentUser = payload;
+        } catch {}
+    }
+
+    carregarConfigsEmpresa().then(() => {
+        buildCatsBar();
+        buildTopoBar();
+        if (currentUser && currentUser.role === 'admin_empresa') {
+            $('btn-config').classList.remove('hidden');
+        }
+        carregarHistorico();
+    });
 }
 
+// ===== CONFIGS POR EMPRESA =====
+async function carregarConfigsEmpresa() {
+    if (!currentUser || !currentUser.empresa) return;
+    const empresa = encodeURIComponent(currentUser.empresa);
+    const token = localStorage.getItem('hub_token');
+    const headers = token ? { Authorization: 'Bearer ' + token } : {};
+
+    try {
+        const [rCat, rTop] = await Promise.all([
+            fetch(`${API_URL}/api/configs/${empresa}/categorias`, { headers }),
+            fetch(`${API_URL}/api/configs/${empresa}/topografos`, { headers })
+        ]);
+        if (rCat.ok) { const d = await rCat.json(); if (d.valores) CATEGORIAS = d.valores; }
+        if (rTop.ok) { const d = await rTop.json(); if (d.valores) TOPOGRAFOS = d.valores; }
+    } catch {}
+}
+
+async function salvarConfigEmpresa(tipo, valores) {
+    if (!currentUser || !currentUser.empresa) return false;
+    const empresa = encodeURIComponent(currentUser.empresa);
+    const token = localStorage.getItem('hub_token');
+    try {
+        const res = await fetch(`${API_URL}/api/configs/${empresa}/${tipo}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ valores })
+        });
+        return res.ok;
+    } catch { return false; }
+}
+
+// ===== PAINEL DE CONFIGURAÇÃO =====
+function abrirConfig() {
+    $('config-cats-list').value = CATEGORIAS.join('\n');
+    $('config-topos-list').value = TOPOGRAFOS.join('\n');
+    $('modal-config').classList.remove('hidden');
+}
+
+function fecharConfig() {
+    $('modal-config').classList.add('hidden');
+}
+
+async function salvarConfig() {
+    const novasCats = $('config-cats-list').value
+        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
+    const novosTopos = $('config-topos-list').value
+        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
+
+    if (novasCats.length === 0) { alert('Categorias não pode ficar vazia.'); return; }
+    if (novosTopos.length === 0) { alert('Topógrafos não pode ficar vazio.'); return; }
+
+    const [okCat, okTop] = await Promise.all([
+        salvarConfigEmpresa('categorias', novasCats),
+        salvarConfigEmpresa('topografos', novosTopos)
+    ]);
+
+    if (okCat && okTop) {
+        CATEGORIAS = novasCats;
+        TOPOGRAFOS = novosTopos;
+        // Reseta seleções e reconstrói as barras
+        catsSelecionadas = [];
+        topoSelecionado = '';
+        buildCatsBar();
+        buildTopoBar();
+        fecharConfig();
+    } else {
+        alert('Erro ao salvar configurações.');
+    }
+}
+
+// ===== BARRAS =====
 function buildCatsBar() {
     const bar = $('cats-bar');
+    // Remove botões antigos, mantém o label
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
     CATEGORIAS.forEach(cat => {
         const btn = document.createElement('button');
         btn.className = 'bar-btn';
@@ -52,6 +149,7 @@ function buildCatsBar() {
 
 function buildTopoBar() {
     const bar = $('topo-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
     TOPOGRAFOS.forEach(name => {
         const btn = document.createElement('button');
         btn.className = 'bar-btn';
@@ -88,7 +186,6 @@ async function handleUpload(e) {
     const isSinglePdf = files.length === 1 && files[0].type === 'application/pdf';
 
     if (isSinglePdf) {
-        // Single PDF → load pages directly
         const data = await readFileAsArrayBuffer(files[0]);
         const pdf = await pdfjsLib.getDocument(new Uint8Array(data)).promise;
         for (let i = 1; i <= pdf.numPages; i++) {
@@ -100,7 +197,6 @@ async function handleUpload(e) {
             pages.push({ imgData: canvas.toDataURL('image/png'), postes: [], w: vp.width, h: vp.height });
         }
     } else {
-        // Multiple files or images → convert all to images
         const allImages = [];
         for (const file of files) {
             if (file.type === 'application/pdf') {
@@ -121,10 +217,8 @@ async function handleUpload(e) {
             }
         }
 
-        // Generate unified PDF download
         try { generateUnifiedPdf(allImages); } catch(e) { console.warn('Erro ao gerar PDF unificado:', e); }
 
-        // Build pages for drawing
         for (const img of allImages) {
             pages.push({ imgData: img.data, postes: [], w: img.w, h: img.h });
         }
@@ -260,7 +354,6 @@ $('canvas-overlay').addEventListener('mousedown', function(e) {
     e.preventDefault();
     if (pages.length === 0) return;
     const rect = this.getBoundingClientRect();
-    // Anti-bug: divide by zoom to get real coordinates
     const x = (e.clientX - rect.left) / zoom;
     const y = (e.clientY - rect.top) / zoom;
 
@@ -286,7 +379,6 @@ function atualizarSidebar() {
     const allPostes = getAllPostes();
     const list = $('sb-list');
 
-    // Summary
     const nProj = allPostes.filter(p => p.tipo === 'projetado').length;
     const nExist = allPostes.filter(p => p.tipo === 'existente').length;
     const nRural = allPostes.filter(p => p.tipo === 'rural').length;
@@ -352,10 +444,8 @@ async function salvarProjeto() {
     if (!ambSelecionado) { alert('Selecione Ambiental (SIM ou NÃO).'); return; }
     if (getAllPostes().length === 0) { alert('Adicione pelo menos um poste.'); return; }
 
-    // 1. Generate stitched image (all pages vertically)
     baixarImagemCosturada(ns);
 
-    // 2. Save to database (WITHOUT base64)
     const allPostes = getAllPostes().map(p => ({ x: p.x, y: p.y, tipo: p.tipo, page: p.page }));
     const total = (allPostes.filter(p => p.tipo === 'projetado').length * PRECO_PROJETADO) +
                   (allPostes.filter(p => p.tipo === 'existente').length * PRECO_EXISTENTE) +
@@ -374,16 +464,20 @@ async function salvarProjeto() {
         km_valor: parseKmValue()
     };
 
+    const token = localStorage.getItem('hub_token');
     try {
         const res = await fetch(`${API_URL}/api/projetos`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: 'Bearer ' + token } : {})
+            },
             body: JSON.stringify(projeto)
         });
         if (res.ok) console.log('✅ Projeto salvo.');
         else console.warn('⚠️ Erro ao salvar.');
     } catch (err) { console.warn('⚠️ Backend offline.', err.message); }
 
-    // 3. Reset
     pages = []; currentPage = 0;
     catsSelecionadas = [];
     topoSelecionado = ''; ambSelecionado = ''; servSelecionado = '';
@@ -404,35 +498,8 @@ function baixarImagemCosturada(ns) {
     finalCanvas.width = maxW; finalCanvas.height = totalH;
     const ctx = finalCanvas.getContext('2d');
 
-    let yOffset = 0;
-    const promises = pages.map((p, pi) => new Promise(resolve => {
-        const img = new Image();
-        img.onload = () => {
-            const myY = yOffset;
-            ctx.drawImage(img, 0, myY, p.w, p.h);
-            // Draw postes on top
-            p.postes.forEach((pt, li) => {
-                const globalIdx = getGlobalIndex(pi, li);
-                const cor = pt.tipo === 'existente' ? '#f97316' : (pt.tipo === 'rural' ? '#2563eb' : '#10b981');
-                const sz = 24;
-                ctx.fillStyle = cor;
-                ctx.fillRect(pt.x - sz/2, myY + pt.y - sz/2, sz, sz);
-                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-                ctx.strokeRect(pt.x - sz/2, myY + pt.y - sz/2, sz, sz);
-                ctx.fillStyle = '#fff';
-                ctx.font = 'bold 11px Arial';
-                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-                ctx.fillText(`${globalIdx + 1}`, pt.x, myY + pt.y);
-            });
-            resolve();
-        };
-        img.src = p.imgData;
-        yOffset += p.h;
-    }));
-
-    // Sequential rendering to maintain order
     (async () => {
-        yOffset = 0;
+        let yOffset = 0;
         for (let pi = 0; pi < pages.length; pi++) {
             await new Promise(resolve => {
                 const p = pages[pi];
@@ -475,7 +542,10 @@ async function carregarHistorico() {
         if (ate) params.push(`ate=${formatDateBR(ate)}`);
         if (params.length > 0) url += '?' + params.join('&');
 
-        const res = await fetch(url);
+        const token = localStorage.getItem('hub_token');
+        const res = await fetch(url, {
+            headers: token ? { Authorization: 'Bearer ' + token } : {}
+        });
         if (res.ok) {
             const data = await res.json();
             historico = data.projetos || [];
@@ -562,14 +632,15 @@ function exportarExcel() {
 
 // ===== RELATÓRIO 7 DIAS =====
 async function gerarRelatorio7Dias() {
-    // Fetch all projects (no filter)
     let allProjects = [];
     try {
-        const res = await fetch(`${API_URL}/api/projetos`);
+        const token = localStorage.getItem('hub_token');
+        const res = await fetch(`${API_URL}/api/projetos`, {
+            headers: token ? { Authorization: 'Bearer ' + token } : {}
+        });
         if (res.ok) { const d = await res.json(); allProjects = d.projetos || []; }
     } catch { alert('Backend offline.'); return; }
 
-    // Last 7 days
     const today = new Date();
     const days = [];
     for (let i = 6; i >= 0; i--) {
@@ -578,7 +649,6 @@ async function gerarRelatorio7Dias() {
         days.push(d.toLocaleDateString('pt-BR'));
     }
 
-    // Build cross table
     const data = {};
     TOPOGRAFOS.forEach(t => {
         data[t] = {};
@@ -593,7 +663,6 @@ async function gerarRelatorio7Dias() {
         }
     });
 
-    // Build HTML table
     let html = `<table><caption>Relatório 7 Dias — ${days[0]} a ${days[6]}</caption><tr><th>Topógrafo</th>`;
     days.forEach(d => html += `<th>${d}</th>`);
     html += '<th>TOTAL</th></tr>';
@@ -609,7 +678,6 @@ async function gerarRelatorio7Dias() {
         html += `<td class="total-cell">${rowTotal}</td></tr>`;
     });
 
-    // Column totals
     html += '<tr><td class="total-cell">TOTAL</td>';
     let grandTotal = 0;
     days.forEach(d => {
@@ -622,7 +690,6 @@ async function gerarRelatorio7Dias() {
 
     $('rel7-container').innerHTML = html;
 
-    // html2canvas → download PNG
     setTimeout(async () => {
         try {
             const canvas = await html2canvas($('rel7-container'), { scale: 2, backgroundColor: '#ffffff' });
