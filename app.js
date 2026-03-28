@@ -1,841 +1,916 @@
 // ===== CONFIGURAÇÃO =====
-const API_URL = window.ENV?.API_URL || 'https://backendearth-production.up.railway.app';
+const API_URL = 'https://back-contagem-production.up.railway.app';
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-const WGS84 = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs";
 
-// ===== AUTH FETCH =====
-function authFetch(url, options = {}) {
-    const token = localStorage.getItem('hub_token');
-    options.headers = {
-        ...(options.headers || {}),
-        'Authorization': 'Bearer ' + token
-    };
-    return fetch(url, options);
-}
+const PRECO_PROJETADO = 0.35;
+const PRECO_EXISTENTE = 0.20;
+const PRECO_RURAL = 1.40;
 
-// ===== ESTADO GLOBAL =====
-let appMode = null; // 'pre_projeto' | 'ambiental' | 'impedimentos'
-let sidebarMode = 'empty'; // 'empty' | 'ns_input' | 'list' | 'point_edit'
-let selMode = 'text'; // 'text' | 'ocr'
-let nsNumber = '';
-let utmZone = '23';
-const hemisphere = 'S';
-let pdfFile = null, pdfDoc = null, pageNum = 1, totalPages = 0, scale = 1.2;
-let approvedPoints = [];
-let tempPoint = { e: '', n: '', title: '', isDivisa: false, pointNumber: 1 };
-let editPointIndex = null;
-let isConferencia = false;
-let isAutoExtracting = false;
-let isDrawing = false, startPos = { x: 0, y: 0 }, currentRect = null;
-let mapInstance = null, markersLayer = null, polylineLayer = null;
-let showMapFlag = false;
-let highlightTimeout = null;
+const CATEGORIAS_DEFAULT = ["AC","EXT.RURAL","EXT.URB","MOD.URB","AFAST/REM","RL/BRT","PASTO","ESTRADA"];
+const TOPOGRAFOS_DEFAULT = ["ALEX TEIXEIRA","BRUNO","CAIO","ESMENDIO","FABIANO","FREELANCER","GENIVALDO","HENRIQUE","JUNIOR","KENEDY","MAURICIO","MAURO"];
 
-// ===== DOM ELEMENTS =====
+let CATEGORIAS = [...CATEGORIAS_DEFAULT];
+let TOPOGRAFOS = [...TOPOGRAFOS_DEFAULT];
+
+// ===== ESTADO =====
+let pages = [];
+let currentPage = 0;
+let zoom = 1;
+let catsSelecionadas = [];
+let topoSelecionado = '';
+let ambSelecionado = '';
+let servSelecionado = '';
+let historico = [];
+let currentUser = null;
+
+// ===== DOM =====
 const $ = id => document.getElementById(id);
 
-// ===== MODE SELECTION =====
-function selectMode(mode) {
-    appMode = mode;
-    $('mode-screen').style.display = 'none';
-    $('app-screen').style.display = 'flex';
-    $('app-screen').classList.remove('hidden');
-
-    const isAmb = mode === 'ambiental' || mode === 'impedimentos';
-    const badge = $('mode-badge');
-    badge.textContent = mode === 'pre_projeto' ? 'Pré Projeto' : mode === 'ambiental' ? 'Ambiental' : 'Impedimentos';
-    badge.className = 'badge ' + (mode === 'pre_projeto' ? 'badge-blue' : mode === 'ambiental' ? 'badge-green' : 'badge-amber');
-
-    if (mode === 'impedimentos') $('conferencia-btn').classList.remove('hidden');
-    else $('conferencia-btn').classList.add('hidden');
-
-    const uploadBtn = $('main-upload-btn');
-    uploadBtn.className = 'upload-btn ' + (isAmb ? 'green' : 'blue');
-    $('upload-center').querySelector('.upload-sub').textContent = isAmb ? 'Selecione o arquivo do levantamento' : 'Selecione o arquivo da Nota de Serviço';
-
-    const btnManual = $('btn-add-manual');
-    btnManual.className = 'btn-manual ' + (isAmb ? 'green' : 'blue');
-    $('btn-export').className = 'btn-export ' + (isAmb ? 'green' : 'blue');
-    $('btn-save-point').className = 'btn-save ' + (mode === 'pre_projeto' ? 'blue' : mode === 'ambiental' ? 'green' : 'amber');
-
-    const editHdr = $('edit-header');
-    editHdr.className = 'edit-header ' + (mode === 'pre_projeto' ? 'blue' : mode === 'ambiental' ? 'green' : 'amber');
-
-    showSidebar('empty');
+// ===== FEEDBACK VISUAL =====
+function mostrarFeedback(msg, tipo = 'sucesso') {
+    let el = document.getElementById('feedback-toast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'feedback-toast';
+        el.style.cssText = 'position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;font-size:13px;font-weight:700;z-index:9999;transition:opacity .3s;box-shadow:0 4px 16px rgba(0,0,0,.2)';
+        document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.background = tipo === 'sucesso' ? '#16a34a' : '#dc2626';
+    el.style.color = '#fff';
+    el.style.opacity = '1';
+    clearTimeout(el._timeout);
+    el._timeout = setTimeout(() => { el.style.opacity = '0'; }, 3000);
 }
 
-function changeMode() {
-    appMode = null;
-    sidebarMode = 'empty';
-    nsNumber = '';
-    pdfFile = null; pdfDoc = null;
-    approvedPoints = [];
-    pageNum = 1; totalPages = 0;
-    editPointIndex = null;
-    isConferencia = false;
-    $('mode-screen').style.display = 'flex';
-    $('app-screen').style.display = 'none';
-    $('pdf-wrapper').classList.add('hidden');
-    $('upload-center').classList.remove('hidden');
-    $('selection-toggle').classList.add('hidden');
-    $('add-pdf-btn').classList.add('hidden');
-    $('page-controls').classList.add('hidden');
-    $('ns-hdr-badge').classList.add('hidden');
-    $('btn-reset').classList.add('hidden');
-    $('ns-cross-mode-warning').classList.add('hidden');
+// ===== INIT =====
+function init() {
+    $('ns-input').addEventListener('input', function() {
+        this.classList.toggle('valid', this.value.length === 10);
+    });
 
-    // Reset file inputs
-    const mainInput = $('main-upload-btn')?.querySelector('input');
-    if (mainInput) mainInput.value = '';
-    const addInput = $('add-pdf-btn')?.querySelector('input');
-    if (addInput) addInput.value = '';
-
-    destroyMap();
-}
-
-function toggleConferencia() {
-    isConferencia = !isConferencia;
-    const btn = $('btn-conf');
-    btn.className = isConferencia ? 'hdr-btn active-yellow' : 'hdr-btn';
-}
-
-// ===== FILE UPLOAD =====
-function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    pdfFile = file;
-
-    if (!nsNumber) {
-        showSidebar('ns_input');
-    } else {
-        showSidebar('list');
+    const token = localStorage.getItem('hub_token');
+    if (token) {
+        try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            currentUser = payload;
+        } catch {}
     }
 
-    selMode = 'text';
-    updateSelectionToggle();
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        try {
-            const loadedPdf = await pdfjsLib.getDocument(new Uint8Array(e.target.result)).promise;
-            pdfDoc = loadedPdf;
-            totalPages = loadedPdf.numPages;
-            pageNum = 1;
-            await renderPage(pageNum);
-            fitPdfToScreen();
-
-            $('upload-center').classList.add('hidden');
-            $('pdf-wrapper').classList.remove('hidden');
-            $('selection-toggle').classList.remove('hidden');
-            $('add-pdf-btn').classList.remove('hidden');
-            $('page-controls').classList.remove('hidden');
-            $('page-controls').style.display = 'flex';
-            $('btn-auto-extract').classList.remove('hidden');
-            updatePageInfo();
-        } catch (err) {
-            console.error(err);
-            alert('Erro ao abrir PDF.');
+    carregarConfigsEmpresa().then(() => {
+        buildCatsBar();
+        buildTopoBar();
+        if (currentUser && currentUser.role === 'admin_empresa') {
+            $('btn-config').classList.remove('hidden');
         }
-    };
-    reader.readAsArrayBuffer(file);
+        buildAmbBar();
+        buildServBar();
+        carregarHistorico();
+    });
 }
 
-// ===== PDF RENDERING =====
-async function renderPage(num) {
-    if (!pdfDoc) return;
+// ===== CONFIGS POR EMPRESA =====
+async function carregarConfigsEmpresa() {
+    if (!currentUser || !currentUser.empresa) return;
+    const empresa = encodeURIComponent(currentUser.empresa);
+    const token = localStorage.getItem('hub_token');
+    const headers = token ? { Authorization: 'Bearer ' + token } : {};
+
     try {
-        const page = await pdfDoc.getPage(num);
-        const viewport = page.getViewport({ scale });
-        const canvas = $('pdf-canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        await page.render({ canvasContext: ctx, viewport }).promise;
-
-        const textLayerDiv = $('text-layer');
-        textLayerDiv.innerHTML = '';
-        textLayerDiv.style.height = viewport.height + 'px';
-        textLayerDiv.style.width = viewport.width + 'px';
-        textLayerDiv.style.setProperty('--scale-factor', String(scale));
-
-        const textContent = await page.getTextContent();
-        pdfjsLib.renderTextLayer({ textContentSource: textContent, container: textLayerDiv, viewport, textDivs: [] });
-    } catch (err) { console.error(err); }
+        const [rCat, rTop] = await Promise.all([
+            fetch(`${API_URL}/api/configs/${empresa}/categorias`, { headers }),
+            fetch(`${API_URL}/api/configs/${empresa}/topografos`, { headers })
+        ]);
+        if (rCat.ok) { const d = await rCat.json(); if (d.valores) CATEGORIAS = d.valores; }
+        if (rTop.ok) { const d = await rTop.json(); if (d.valores) TOPOGRAFOS = d.valores; }
+    } catch {}
 }
 
-function fitPdfToScreen() {
-    const canvas = $('pdf-canvas');
-    if (!canvas || canvas.width === 0) return;
-    const availableWidth = window.innerWidth - 400 - 32;
-    let newScale = availableWidth / canvas.width;
-    newScale = Math.max(0.5, Math.min(1.5, newScale));
-    scale = newScale;
-    renderPage(pageNum);
-    $('zoom-info').textContent = Math.round(scale * 100) + '%';
+async function salvarConfigEmpresa(tipo, valores) {
+    if (!currentUser || !currentUser.empresa) return false;
+    const empresa = encodeURIComponent(currentUser.empresa);
+    const token = localStorage.getItem('hub_token');
+    try {
+        const res = await fetch(`${API_URL}/api/configs/${empresa}/${tipo}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ valores })
+        });
+        return res.ok;
+    } catch { return false; }
 }
 
-function prevPage() { if (pageNum > 1) { pageNum--; renderPage(pageNum); updatePageInfo(); } }
-function nextPage() { if (pageNum < totalPages) { pageNum++; renderPage(pageNum); updatePageInfo(); } }
-function zoomIn() { scale = Math.min(scale + 0.2, 3.0); renderPage(pageNum); $('zoom-info').textContent = Math.round(scale * 100) + '%'; }
-function zoomOut() { scale = Math.max(scale - 0.2, 0.5); renderPage(pageNum); $('zoom-info').textContent = Math.round(scale * 100) + '%'; }
-function updatePageInfo() { $('page-info').textContent = pageNum + '/' + totalPages; }
-function setSelectionMode(mode) {
-    selMode = mode;
-    updateSelectionToggle();
-    $('pdf-wrapper').style.cursor = mode === 'ocr' ? 'crosshair' : '';
-}
-function updateSelectionToggle() {
-    $('btn-text').className = 'hdr-btn' + (selMode === 'text' ? ' active' : '');
-    $('btn-ocr').className = 'hdr-btn' + (selMode === 'ocr' ? ' active-purple' : '');
+// ===== PAINEL DE CONFIGURAÇÃO =====
+function abrirConfig() {
+    $('config-cats-list').value = CATEGORIAS.join('\n');
+    $('config-topos-list').value = TOPOGRAFOS.join('\n');
+    $('modal-config').classList.remove('hidden');
 }
 
-// ===== TEXT SELECTION =====
-$('text-layer').addEventListener('mouseup', () => {
-    if (selMode !== 'text') return;
-    const sel = window.getSelection();
-    const text = sel?.toString().trim();
-    if (text) { processExtractedText(text); sel.removeAllRanges(); }
+function fecharConfig() {
+    $('modal-config').classList.add('hidden');
+}
+
+async function salvarConfig() {
+    const novasCats = $('config-cats-list').value
+        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
+    const novosTopos = $('config-topos-list').value
+        .split('\n').map(v => v.trim().toUpperCase()).filter(v => v.length > 0);
+
+    if (novasCats.length === 0) { alert('Categorias não pode ficar vazia.'); return; }
+    if (novosTopos.length === 0) { alert('Topógrafos não pode ficar vazio.'); return; }
+
+    const [okCat, okTop] = await Promise.all([
+        salvarConfigEmpresa('categorias', novasCats),
+        salvarConfigEmpresa('topografos', novosTopos)
+    ]);
+
+    if (okCat && okTop) {
+        CATEGORIAS = novasCats;
+        TOPOGRAFOS = novosTopos;
+        catsSelecionadas = [];
+        topoSelecionado = '';
+        buildCatsBar();
+        buildTopoBar();
+        fecharConfig();
+    } else {
+        alert('Erro ao salvar configurações.');
+    }
+}
+
+// ===== MENU DE CONTEXTO =====
+let ctxMenu = null;
+
+function fecharMenuContexto() {
+    if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+}
+
+document.addEventListener('click', fecharMenuContexto);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') fecharMenuContexto(); });
+
+function abrirMenuContexto(e, tipo) {
+    e.preventDefault();
+    if (!currentUser || currentUser.role !== 'admin_empresa') return;
+
+    fecharMenuContexto();
+
+    const lista = tipo === 'categorias' ? CATEGORIAS
+                : tipo === 'topografos' ? TOPOGRAFOS
+                : tipo === 'ambiental'  ? AMB_OPCOES
+                : SERV_OPCOES;
+
+    const menu = document.createElement('div');
+    menu.className = 'ctx-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top  = e.clientY + 'px';
+
+    const addItem = (icon, label, fn) => {
+        const item = document.createElement('div');
+        item.className = 'ctx-item';
+        item.innerHTML = `<span class="ctx-icon">${icon}</span>${label}`;
+        item.onclick = (ev) => { ev.stopPropagation(); fecharMenuContexto(); fn(); };
+        menu.appendChild(item);
+    };
+
+    addItem('＋', 'Incluir', () => acaoIncluir(tipo));
+    addItem('✏️', 'Editar', () => acaoEditar(tipo, lista));
+    addItem('－', 'Remover', () => acaoRemover(tipo, lista));
+
+    document.body.appendChild(menu);
+    ctxMenu = menu;
+}
+
+function acaoIncluir(tipo) {
+    const novo = prompt('Nome do novo item:');
+    if (!novo || !novo.trim()) return;
+    const val = novo.trim().toUpperCase();
+    const lista = obterLista(tipo);
+    if (lista.includes(val)) { alert('Item já existe.'); return; }
+    lista.push(val);
+    persistirESincronizar(tipo, lista);
+}
+
+function acaoEditar(tipo, lista) {
+    const idx = escolherItem(lista, 'Editar qual item?');
+    if (idx === null) return;
+    const novo = prompt('Novo nome:', lista[idx]);
+    if (!novo || !novo.trim()) return;
+    const val = novo.trim().toUpperCase();
+    lista[idx] = val;
+    persistirESincronizar(tipo, lista);
+}
+
+function acaoRemover(tipo, lista) {
+    if (lista.length <= 1) { alert('A lista não pode ficar vazia.'); return; }
+    const idx = escolherItem(lista, 'Remover qual item?');
+    if (idx === null) return;
+    lista.splice(idx, 1);
+    persistirESincronizar(tipo, lista);
+}
+
+function escolherItem(lista, titulo) {
+    const opcoes = lista.map((v, i) => `${i + 1}. ${v}`).join('\n');
+    const entrada = prompt(`${titulo}\n\n${opcoes}\n\nDigite o número:`);
+    if (!entrada) return null;
+    const idx = parseInt(entrada) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= lista.length) { alert('Número inválido.'); return null; }
+    return idx;
+}
+
+function obterLista(tipo) {
+    if (tipo === 'categorias') return CATEGORIAS;
+    if (tipo === 'topografos') return TOPOGRAFOS;
+    if (tipo === 'ambiental')  return AMB_OPCOES;
+    return SERV_OPCOES;
+}
+
+async function persistirESincronizar(tipo, lista) {
+    if (tipo === 'ambiental' || tipo === 'servidao') {
+        rebuilBarPorTipo(tipo);
+        return;
+    }
+    const ok = await salvarConfigEmpresa(tipo, lista);
+    if (!ok) { alert('Erro ao salvar no servidor.'); return; }
+    rebuilBarPorTipo(tipo);
+}
+
+function rebuilBarPorTipo(tipo) {
+    if (tipo === 'categorias') { catsSelecionadas = []; buildCatsBar(); }
+    else if (tipo === 'topografos') { topoSelecionado = ''; buildTopoBar(); }
+    else if (tipo === 'ambiental') { ambSelecionado = ''; buildAmbBar(); }
+    else if (tipo === 'servidao') { servSelecionado = ''; buildServBar(); }
+}
+
+// ===== BARRAS =====
+let AMB_OPCOES  = ['SIM', 'NÃO'];
+let SERV_OPCOES = ['SST', 'SSC', 'SSTC'];
+
+function buildCatsBar() {
+    const bar = $('cats-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'categorias');
+    CATEGORIAS.forEach(cat => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = cat;
+        btn.onclick = () => {
+            if (catsSelecionadas.includes(cat)) {
+                catsSelecionadas = catsSelecionadas.filter(c => c !== cat);
+                btn.classList.remove('active');
+            } else {
+                catsSelecionadas.push(cat);
+                btn.classList.add('active');
+            }
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function buildTopoBar() {
+    const bar = $('topo-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'topografos');
+    TOPOGRAFOS.forEach(name => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = name;
+        btn.onclick = () => {
+            bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            topoSelecionado = name;
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function buildAmbBar() {
+    const bar = $('amb-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'ambiental');
+    AMB_OPCOES.forEach(val => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = val;
+        btn.onclick = () => {
+            ambSelecionado = val;
+            bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-green'));
+            btn.classList.add(val === 'SIM' ? 'active-green' : 'active');
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function buildServBar() {
+    const bar = $('serv-bar');
+    bar.querySelectorAll('.bar-btn').forEach(b => b.remove());
+    bar.oncontextmenu = e => abrirMenuContexto(e, 'servidao');
+    SERV_OPCOES.forEach(val => {
+        const btn = document.createElement('button');
+        btn.className = 'bar-btn';
+        btn.textContent = val;
+        btn.onclick = () => {
+            servSelecionado = val;
+            bar.querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-amber'));
+            btn.classList.add('active-amber');
+        };
+        bar.appendChild(btn);
+    });
+}
+
+function setAmbiental(val, btn) {
+    ambSelecionado = val;
+    $('amb-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-green'));
+    btn.classList.add(val === 'SIM' ? 'active-green' : 'active');
+}
+
+function setServidao(val, btn) {
+    servSelecionado = val;
+    $('serv-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-amber'));
+    btn.classList.add('active-amber');
+}
+
+// ===== UPLOAD =====
+async function handleUpload(e) {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    pages = [];
+    currentPage = 0;
+
+    const isSinglePdf = files.length === 1 && files[0].type === 'application/pdf';
+
+    if (isSinglePdf) {
+        const data = await readFileAsArrayBuffer(files[0]);
+        const pdf = await pdfjsLib.getDocument(new Uint8Array(data)).promise;
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const vp = page.getViewport({ scale: 2 });
+            const canvas = document.createElement('canvas');
+            canvas.width = vp.width; canvas.height = vp.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+            pages.push({ imgData: canvas.toDataURL('image/png'), postes: [], w: vp.width, h: vp.height });
+        }
+    } else {
+        const allImages = [];
+        for (const file of files) {
+            if (file.type === 'application/pdf') {
+                const data = await readFileAsArrayBuffer(file);
+                const pdf = await pdfjsLib.getDocument(new Uint8Array(data)).promise;
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const vp = page.getViewport({ scale: 2 });
+                    const c = document.createElement('canvas');
+                    c.width = vp.width; c.height = vp.height;
+                    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+                    allImages.push({ data: c.toDataURL('image/png'), w: vp.width, h: vp.height });
+                }
+            } else {
+                const imgData = await readFileAsDataURL(file);
+                const dim = await getImageDimensions(imgData);
+                allImages.push({ data: imgData, w: dim.w, h: dim.h });
+            }
+        }
+
+        try { generateUnifiedPdf(allImages); } catch(e) { console.warn('Erro ao gerar PDF unificado:', e); }
+
+        for (const img of allImages) {
+            pages.push({ imgData: img.data, postes: [], w: img.w, h: img.h });
+        }
+    }
+
+    if (pages.length > 0) mostrarTelaDesenho();
+}
+
+function generateUnifiedPdf(images) {
+    const { jsPDF } = window.jspdf;
+    let pdf = null;
+
+    images.forEach((img, i) => {
+        const pxToMm = 25.4 / 96;
+        const pageW = img.w * pxToMm;
+        const pageH = img.h * pxToMm;
+        const orientation = pageW >= pageH ? 'l' : 'p';
+
+        if (i === 0) {
+            pdf = new jsPDF(orientation, 'mm', [pageW, pageH]);
+        } else {
+            pdf.addPage([pageW, pageH], orientation);
+        }
+
+        pdf.addImage(img.data, 'PNG', 0, 0, pageW, pageH);
+    });
+
+    if (pdf) pdf.save('Croqui_Unificado.pdf');
+}
+
+// ===== NAVIGATION =====
+function mostrarTelaDesenho() {
+    $('tela-upload').classList.add('hidden');
+    $('tela-desenho').classList.remove('hidden');
+    $('hdr-row2').classList.remove('hidden');
+    $('btn-voltar').classList.remove('hidden');
+    $('btn-salvar').classList.remove('hidden');
+
+    zoomReset();
+    renderCurrentPage();
+    atualizarSidebar();
+    atualizarTotal();
+}
+
+function voltarUpload() {
+    $('tela-upload').classList.remove('hidden');
+    $('tela-desenho').classList.add('hidden');
+    $('hdr-row2').classList.add('hidden');
+    $('btn-voltar').classList.add('hidden');
+    $('btn-salvar').classList.add('hidden');
+    $('file-input').value = '';
+    carregarHistorico();
+}
+
+// ===== PAGE NAVIGATION =====
+function prevPage() { if (currentPage > 0) { currentPage--; renderCurrentPage(); atualizarSidebar(); } }
+function nextPage() { if (currentPage < pages.length - 1) { currentPage++; renderCurrentPage(); atualizarSidebar(); } }
+function updatePageInfo() {
+    $('page-info').textContent = `${currentPage + 1}/${pages.length}`;
+    $('btn-prev').disabled = currentPage === 0;
+    $('btn-next').disabled = currentPage >= pages.length - 1;
+}
+
+// ===== ZOOM =====
+function zoomIn() { zoom = Math.min(zoom + 0.15, 3); applyZoom(); }
+function zoomOut() { zoom = Math.max(zoom - 0.15, 0.3); applyZoom(); }
+function zoomReset() {
+    if (pages.length === 0) { zoom = 1; return; }
+    const area = $('canvas-area');
+    const p = pages[currentPage];
+    const fitW = (area.clientWidth - 100) / p.w;
+    const fitH = (area.clientHeight - 100) / p.h;
+    zoom = Math.min(fitW, fitH, 1);
+    applyZoom();
+}
+function applyZoom() {
+    $('zoom-info').textContent = Math.round(zoom * 100) + '%';
+    const wrapper = $('canvas-wrapper');
+    wrapper.style.transform = `scale(${zoom})`;
+}
+
+// ===== RENDER PAGE =====
+function renderCurrentPage() {
+    if (pages.length === 0) return;
+    const p = pages[currentPage];
+    const img = new Image();
+    img.onload = () => {
+        const baseCanvas = $('canvas-base');
+        const overlayCanvas = $('canvas-overlay');
+        baseCanvas.width = p.w; baseCanvas.height = p.h;
+        overlayCanvas.width = p.w; overlayCanvas.height = p.h;
+
+        const ctx = baseCanvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, p.w, p.h);
+        redesenharOverlay();
+    };
+    img.src = p.imgData;
+    updatePageInfo();
+}
+
+function redesenharOverlay() {
+    const canvas = $('canvas-overlay');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const postes = pages[currentPage]?.postes || [];
+    postes.forEach((p, i) => {
+        const globalIdx = getGlobalIndex(currentPage, i);
+        const cor = p.tipo === 'existente' ? '#f97316' : (p.tipo === 'rural' ? '#2563eb' : '#10b981');
+        const sz = 24;
+        ctx.fillStyle = cor;
+        ctx.fillRect(p.x - sz/2, p.y - sz/2, sz, sz);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(p.x - sz/2, p.y - sz/2, sz, sz);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`${globalIdx + 1}`, p.x, p.y);
+    });
+}
+
+function getGlobalIndex(pageIdx, localIdx) {
+    let count = 0;
+    for (let i = 0; i < pageIdx; i++) count += pages[i].postes.length;
+    return count + localIdx;
+}
+
+// ===== CANVAS CLICK =====
+$('canvas-overlay').addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    if (pages.length === 0) return;
+    const rect = this.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / zoom;
+    const y = (e.clientY - rect.top) / zoom;
+
+    let tipo = 'projetado';
+    if (e.button === 2) tipo = 'existente';
+    else if (e.shiftKey) tipo = 'rural';
+
+    pages[currentPage].postes.push({ x, y, tipo });
+    redesenharOverlay();
+    atualizarSidebar();
+    atualizarTotal();
 });
 
-function processExtractedText(text) {
-    if (!text) return;
-    const cleanText = text.replace(/[^\d:.\-\s]/g, ' ');
+// ===== SIDEBAR =====
+function getAllPostes() {
+    let all = [];
+    pages.forEach((p, pi) => p.postes.forEach((pt, li) => all.push({ ...pt, page: pi, localIdx: li })));
+    return all;
+}
 
-    if (sidebarMode === 'ns_input') {
-        const digitsOnly = cleanText.replace(/\D/g, '');
-        const nsMatch = digitsOnly.match(/(\d{10})/);
-        if (nsMatch) { $('ns-input').value = nsMatch[0]; nsNumber = nsMatch[0]; updateNsConfirmBtn(); }
+function atualizarSidebar() {
+    const postes = pages[currentPage]?.postes || [];
+    const allPostes = getAllPostes();
+    const list = $('sb-list');
+
+    const nProj = allPostes.filter(p => p.tipo === 'projetado').length;
+    const nExist = allPostes.filter(p => p.tipo === 'existente').length;
+    const nRural = allPostes.filter(p => p.tipo === 'rural').length;
+    $('sb-summary').innerHTML = `
+        <span><div class="dot proj"></div>${nProj} Proj</span>
+        <span><div class="dot exist"></div>${nExist} Exist</span>
+        <span><div class="dot rur"></div>${nRural} Rural</span>
+    `;
+
+    if (postes.length === 0) {
+        list.innerHTML = '<div class="sb-empty">Clique na imagem para adicionar</div>';
         return;
     }
 
-    const regex = /(\d{6}[.,]?\d{0,3})[\D]{0,15}(\d{7}[.,]?\d{0,3})/;
-    const match = regex.exec(cleanText);
-    if (match) {
-        const eVal = match[1].replace(',', '.');
-        const nVal = match[2].replace(',', '.');
-        const nextNum = approvedPoints.length > 0 ? Math.max(...approvedPoints.map(p => p.pointNumber || 0)) + 1 : 1;
-        tempPoint = { e: eVal, n: nVal, title: '', isDivisa: false, pointNumber: nextNum };
-        editPointIndex = null;
-        showSidebar('point_edit');
-    } else if (selMode === 'ocr') {
-        alert('Números não identificados.');
-    }
+    const precos = { projetado: '0,35', existente: '0,20', rural: '1,40' };
+    let offset = 0;
+    for (let i = 0; i < currentPage; i++) offset += pages[i].postes.length;
+
+    list.innerHTML = postes.map((p, i) => `
+        <div class="poste-item">
+            <div class="poste-left">
+                <div class="poste-num">${offset + i + 1}</div>
+                <div>
+                    <div class="poste-tipo ${p.tipo}">${p.tipo}</div>
+                    <div class="poste-valor">US ${precos[p.tipo]}</div>
+                </div>
+            </div>
+            <button class="poste-del" onclick="removerPoste(${i})">🗑</button>
+        </div>
+    `).join('');
 }
 
-// ===== BOTÃO DIREITO: SALVAR PONTO =====
-document.addEventListener('contextmenu', (e) => {
-    if (sidebarMode !== 'point_edit') return;
-    e.preventDefault();
-    savePoint();
-});
+function removerPoste(localIdx) {
+    pages[currentPage].postes.splice(localIdx, 1);
+    redesenharOverlay();
+    atualizarSidebar();
+    atualizarTotal();
+}
 
-// ===== OCR =====
-const pdfWrapper = $('pdf-wrapper');
-pdfWrapper.addEventListener('mousedown', (e) => {
-    if (selMode !== 'ocr') return;
-    const rect = pdfWrapper.getBoundingClientRect();
-    isDrawing = true;
-    startPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    currentRect = null;
-    $('ocr-rect').classList.add('hidden');
-});
-pdfWrapper.addEventListener('mousemove', (e) => {
-    if (!isDrawing || selMode !== 'ocr') return;
-    const rect = pdfWrapper.getBoundingClientRect();
-    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-    const w = cx - startPos.x, h = cy - startPos.y;
-    currentRect = { x: w > 0 ? startPos.x : cx, y: h > 0 ? startPos.y : cy, w: Math.abs(w), h: Math.abs(h) };
-    const ocrRect = $('ocr-rect');
-    ocrRect.classList.remove('hidden');
-    ocrRect.style.left = currentRect.x + 'px';
-    ocrRect.style.top = currentRect.y + 'px';
-    ocrRect.style.width = currentRect.w + 'px';
-    ocrRect.style.height = currentRect.h + 'px';
-});
-pdfWrapper.addEventListener('mouseup', async () => {
-    if (!isDrawing || !currentRect || selMode !== 'ocr') { isDrawing = false; return; }
-    isDrawing = false;
-    if (currentRect.w < 5 || currentRect.h < 5) { currentRect = null; $('ocr-rect').classList.add('hidden'); return; }
+function atualizarTotal() {
+    const allPostes = getAllPostes();
+    const total = (allPostes.filter(p => p.tipo === 'projetado').length * PRECO_PROJETADO) +
+                  (allPostes.filter(p => p.tipo === 'existente').length * PRECO_EXISTENTE) +
+                  (allPostes.filter(p => p.tipo === 'rural').length * PRECO_RURAL) +
+                  parseKmValue();
+    $('total-us').textContent = `US ${fmtVal(total)}`;
+}
 
-    $('ocr-overlay').classList.remove('hidden');
+function parseKmValue() {
+    const raw = $('km-input').value.replace(',', '.').trim();
+    const val = parseFloat(raw);
+    return isNaN(val) ? 0 : val;
+}
+
+function fmtVal(v) { return v.toFixed(2).replace('.', ','); }
+
+// ===== SAVE =====
+async function salvarProjeto() {
+    const ns = $('ns-input').value;
+    if (ns.length !== 10) { alert('NS deve ter exatamente 10 dígitos.'); return; }
+    if (catsSelecionadas.length === 0) { alert('Selecione pelo menos uma Categoria.'); return; }
+    if (!topoSelecionado) { alert('Selecione um Topógrafo.'); return; }
+    if (!ambSelecionado) { alert('Selecione Ambiental (SIM ou NÃO).'); return; }
+    if (getAllPostes().length === 0) { alert('Adicione pelo menos um poste.'); return; }
+
+    baixarImagemCosturada(ns);
+
+    const allPostes = getAllPostes().map(p => ({ x: p.x, y: p.y, tipo: p.tipo, page: p.page }));
+    const total = (allPostes.filter(p => p.tipo === 'projetado').length * PRECO_PROJETADO) +
+                  (allPostes.filter(p => p.tipo === 'existente').length * PRECO_EXISTENTE) +
+                  (allPostes.filter(p => p.tipo === 'rural').length * PRECO_RURAL) +
+                  parseKmValue();
+
+    const projeto = {
+        ns,
+        data_registro: new Date().toLocaleDateString('pt-BR'),
+        postes: allPostes,
+        total,
+        categorias_globais: catsSelecionadas,
+        topografo: topoSelecionado,
+        ambiental: ambSelecionado,
+        servidao: servSelecionado,
+        km_valor: parseKmValue()
+    };
+
+    const token = localStorage.getItem('hub_token');
+    const btnSalvar = $('btn-salvar');
+    const textoOriginal = btnSalvar.textContent;
+    btnSalvar.disabled = true;
+    btnSalvar.textContent = '⏳ Salvando...';
+
     try {
-        const canvas = $('pdf-canvas');
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = currentRect.w; tempCanvas.height = currentRect.h;
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCtx.drawImage(canvas, currentRect.x, currentRect.y, currentRect.w, currentRect.h, 0, 0, currentRect.w, currentRect.h);
-        const blob = await new Promise(r => tempCanvas.toBlob(r));
-        if (!blob) throw new Error('Imagem erro');
-        const worker = await Tesseract.createWorker('eng');
-        const ret = await worker.recognize(blob);
-        await worker.terminate();
-        processExtractedText(ret.data.text);
-    } catch (err) { alert('Erro no OCR.'); }
-    finally { $('ocr-overlay').classList.add('hidden'); $('ocr-rect').classList.add('hidden'); currentRect = null; }
-});
-
-// ===== NS CONFIRM =====
-$('ns-input').addEventListener('input', function() {
-    nsNumber = this.value;
-    updateNsConfirmBtn();
-});
-function updateNsConfirmBtn() {
-    $('ns-confirm').disabled = nsNumber.length < 3;
-}
-
-async function confirmNS() {
-    if (nsNumber.length < 3) { alert('NS deve ter pelo menos 3 caracteres.'); return; }
-
-    const isSharedMode = appMode === 'ambiental' || appMode === 'impedimentos';
-
-    if (isSharedMode) {
-        try {
-            const resp = await authFetch(`${API_URL}/api/projetos?ns=${encodeURIComponent(nsNumber)}&modo=${appMode}`);
-            const data = await resp.json();
-            if (data.exists && data.projeto) {
-                const pts = data.projeto.pontos;
-                const zone = data.projeto.utm_zone;
-                if (Array.isArray(pts) && pts.length > 0) {
-                    const shouldImport = confirm(`Existem ${pts.length} ponto(s) armazenados desta NS.\nDeseja importar as informações?`);
-                    if (shouldImport) {
-                        approvedPoints = pts.map((p, i) => ({
-                            id: p.id || Date.now().toString(),
-                            title: p.title || '', utmE: p.utmE || '', utmN: p.utmN || '',
-                            lat: p.lat || 0, lon: p.lon || 0, zone: p.zone || '',
-                            fromFile: p.fromFile || 'Importado', isDivisa: p.isDivisa || false,
-                            pointNumber: p.pointNumber || (i + 1),
-                            pdfPage: p.pdfPage || null, pdfX: p.pdfX || null, pdfY: p.pdfY || null
-                        }));
-                        if (zone) { utmZone = zone; $('utm-zone-input').value = zone; }
-                    }
-                }
-            }
-        } catch (err) { console.error('Erro buscando NS:', err); }
-    }
-
-    $('ns-hdr-badge').textContent = 'NS:' + nsNumber;
-    $('ns-hdr-badge').classList.remove('hidden');
-    $('btn-reset').classList.remove('hidden');
-    showSidebar('list');
-
-    if (isSharedMode) {
-        try {
-            const checkResp = await authFetch(`${API_URL}/api/levantamentos/ns-check?ns=${encodeURIComponent(nsNumber)}`);
-            const checkData = await checkResp.json();
-            const modeLabels = { ambiental_compartilhado: 'Ambiental/Impedimentos' };
-            const outros = (checkData.modos || []).filter(m =>
-                m.modo !== 'ambiental_compartilhado' && parseInt(m.total_pontos) > 0
-            );
-            const warn = $('ns-cross-mode-warning');
-            if (outros.length > 0) {
-                const lista = outros.map(m => `${modeLabels[m.modo] || m.modo} (${m.total_pontos} ponto${m.total_pontos != 1 ? 's' : ''})`).join(' · ');
-                warn.innerHTML = `<b>⚠️ NS ${nsNumber} também possui dados em:</b>${lista}`;
-                warn.classList.remove('hidden');
-            } else {
-                warn.classList.add('hidden');
-            }
-        } catch (err) { console.error('Erro verificando outros modos:', err); }
-    }
-}
-
-// ===== SYNC TO POSTGRESQL =====
-async function syncToDatabase() {
-    if (!nsNumber || nsNumber.length < 3) return;
-    try {
-        await authFetch(`${API_URL}/api/projetos`, {
+        const res = await fetch(`${API_URL}/api/projetos`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                ns: nsNumber, modo: appMode, utm_zone: utmZone,
-                pontos: approvedPoints.map((p, i) => ({
-                    id: p.id, title: p.title, utmE: p.utmE, utmN: p.utmN,
-                    lat: p.lat, lon: p.lon, zone: p.zone, fromFile: p.fromFile,
-                    isDivisa: p.isDivisa, pointNumber: p.pointNumber || (i + 1),
-                    pdfPage: p.pdfPage || null, pdfX: p.pdfX || null, pdfY: p.pdfY || null
-                }))
-            })
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token
+            },
+            body: JSON.stringify(projeto)
         });
-    } catch (err) { console.error('Erro ao sincronizar:', err); }
-}
 
-// ===== SAVE POINT =====
-function savePoint() {
-    try {
-        const e = parseFloat($('edit-e').value);
-        const n = parseFloat($('edit-n').value);
-        if (isNaN(e) || isNaN(n)) throw new Error('Inválido');
-        const utmProj = `+proj=utm +zone=${utmZone} +south +ellps=WGS84 +datum=WGS84 +units=m +no_defs`;
-        const [lon, lat] = proj4(utmProj, WGS84, [e, n]);
-
-        const pNum = parseInt($('edit-num').value) || 1;
-        let finalTitle = '';
-        if (appMode === 'ambiental' || appMode === 'impedimentos') {
-            finalTitle = `P${pNum} ${utmZone}k ${$('edit-e').value}:${$('edit-n').value}`;
+        if (res.ok) {
+            mostrarFeedback('✅ Projeto salvo com sucesso!', 'sucesso');
         } else {
-            const customTitle = $('edit-title-input') ? $('edit-title-input').value : '';
-            finalTitle = `${customTitle} - ${$('edit-e').value}:${$('edit-n').value} - NS: ${nsNumber}`;
+            const data = await res.json();
+            const msg = data.errors ? data.errors.join(', ') : (data.error || 'Erro ao salvar');
+            mostrarFeedback('❌ ' + msg, 'erro');
+            btnSalvar.disabled = false;
+            btnSalvar.textContent = textoOriginal;
+            return;
         }
-
-        const pointData = {
-            title: finalTitle, utmE: $('edit-e').value, utmN: $('edit-n').value,
-            lat, lon, zone: `${utmZone}${hemisphere}`,
-            fromFile: pdfFile?.name || 'Manual',
-            isDivisa: tempPoint.isDivisa, pointNumber: pNum
-        };
-
-        if (editPointIndex !== null) {
-            approvedPoints[editPointIndex] = { ...approvedPoints[editPointIndex], ...pointData };
-        } else {
-            approvedPoints.push({ id: Date.now().toString(), ...pointData });
-        }
-        approvedPoints.sort((a, b) => (a.pointNumber || 0) - (b.pointNumber || 0));
-
-        editPointIndex = null;
-        showSidebar('list');
-        syncToDatabase();
-    } catch (err) { alert('Erro na Conversão. Verifique coordenadas e fuso UTM.'); }
-}
-
-// ===== DELETE POINT =====
-function handleDeletePoint(idx) {
-    approvedPoints.splice(idx, 1);
-    if (approvedPoints.length > 0 && idx <= approvedPoints.length) {
-        const doReseq = confirm('Deseja renumerar os pontos seguintes?');
-        if (doReseq) {
-            for (let i = idx; i < approvedPoints.length; i++) {
-                const old = approvedPoints[i].pointNumber || (i + 2);
-                const newN = old - 1;
-                approvedPoints[i].title = approvedPoints[i].title.replace(new RegExp(`\\bP${old}\\b`, 'i'), `P${newN}`);
-                approvedPoints[i].pointNumber = newN;
-            }
-        }
+    } catch (err) {
+        mostrarFeedback('❌ Backend offline. Projeto não salvo.', 'erro');
+        btnSalvar.disabled = false;
+        btnSalvar.textContent = textoOriginal;
+        return;
     }
-    renderPointsList();
-    updateMap();
-    syncToDatabase();
+
+    btnSalvar.disabled = false;
+    btnSalvar.textContent = textoOriginal;
+
+    pages = []; currentPage = 0;
+    catsSelecionadas = [];
+    topoSelecionado = ''; ambSelecionado = ''; servSelecionado = '';
+    $('ns-input').value = ''; $('ns-input').classList.remove('valid');
+    $('km-input').value = '';
+    $('cats-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active'));
+    $('topo-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active'));
+    $('amb-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-green'));
+    $('serv-bar').querySelectorAll('.bar-btn').forEach(b => b.classList.remove('active', 'active-amber'));
+    voltarUpload();
 }
 
-// ===== EDIT POINT =====
-function handleEditPoint(idx) {
-    const p = approvedPoints[idx];
-    let editTitle = p.title;
-    if (appMode === 'pre_projeto') { const s = p.title.split(' - '); if (s.length > 0) editTitle = s[0]; }
-    tempPoint = { e: p.utmE, n: p.utmN, title: editTitle, isDivisa: p.isDivisa, pointNumber: p.pointNumber || (idx + 1) };
-    editPointIndex = idx;
-    showSidebar('point_edit');
-}
-
-function handleManualAdd() {
-    const nextNum = approvedPoints.length > 0 ? Math.max(...approvedPoints.map(p => p.pointNumber || 0)) + 1 : 1;
-    tempPoint = { e: '', n: '', title: '', isDivisa: false, pointNumber: nextNum };
-    editPointIndex = null;
-    showSidebar('point_edit');
-}
-
-function cancelEdit() { editPointIndex = null; showSidebar('list'); }
-
-function toggleDivisa() {
-    tempPoint.isDivisa = !tempPoint.isDivisa;
-    const btn = $('btn-divisa');
-    btn.className = 'btn-divisa ' + (tempPoint.isDivisa ? 'on' : 'off');
-    btn.innerHTML = tempPoint.isDivisa ? '📍 ✓ DIVISA ATIVA' : '📍 Marcar como Divisa';
-    $('divisa-hint').textContent = tempPoint.isDivisa ? 'Pino será: shaded_dot (divisória)' : 'Pino será: placemark_circle (padrão ambiental)';
-}
-
-// ===== HIGHLIGHT POINT ON PDF =====
-function highlightPoint(point) {
-    if (!point.pdfPage || !point.pdfX || !point.pdfY || !pdfDoc) return;
-    pageNum = point.pdfPage;
-    renderPage(pageNum);
-    updatePageInfo();
+function baixarImagemCosturada(ns) {
+    if (pages.length === 0) return;
+    const totalH = pages.reduce((s, p) => s + p.h, 0);
+    const maxW = Math.max(...pages.map(p => p.w));
+    const finalCanvas = document.createElement('canvas');
+    finalCanvas.width = maxW; finalCanvas.height = totalH;
+    const ctx = finalCanvas.getContext('2d');
 
     (async () => {
-        const page = await pdfDoc.getPage(point.pdfPage);
-        const viewport = page.getViewport({ scale });
-        const cx = point.pdfX * scale;
-        const cy = viewport.height - (point.pdfY * scale);
-
-        const box = $('highlight-box');
-        box.classList.remove('hidden');
-        box.style.left = (cx - 50) + 'px';
-        box.style.top = (cy - 30) + 'px';
-        box.style.width = '100px';
-        box.style.height = '60px';
-
-        const pdfArea = $('pdf-area');
-        setTimeout(() => {
-            pdfArea.scrollTo({ left: Math.max(0, cx - pdfArea.clientWidth / 2), top: Math.max(0, cy - pdfArea.clientHeight / 2), behavior: 'smooth' });
-        }, 300);
-
-        if (highlightTimeout) clearTimeout(highlightTimeout);
-        highlightTimeout = setTimeout(() => box.classList.add('hidden'), 4000);
+        let yOffset = 0;
+        for (let pi = 0; pi < pages.length; pi++) {
+            await new Promise(resolve => {
+                const p = pages[pi];
+                const img = new Image();
+                img.onload = () => {
+                    ctx.drawImage(img, 0, yOffset, p.w, p.h);
+                    p.postes.forEach((pt, li) => {
+                        const globalIdx = getGlobalIndex(pi, li);
+                        const cor = pt.tipo === 'existente' ? '#f97316' : (pt.tipo === 'rural' ? '#2563eb' : '#10b981');
+                        ctx.fillStyle = cor;
+                        ctx.fillRect(pt.x - 12, yOffset + pt.y - 12, 24, 24);
+                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                        ctx.strokeRect(pt.x - 12, yOffset + pt.y - 12, 24, 24);
+                        ctx.fillStyle = '#fff';
+                        ctx.font = 'bold 11px Arial';
+                        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                        ctx.fillText(`${globalIdx + 1}`, pt.x, yOffset + pt.y);
+                    });
+                    yOffset += p.h;
+                    resolve();
+                };
+                img.src = p.imgData;
+            });
+        }
+        const link = document.createElement('a');
+        link.download = `Croqui_${ns}.png`;
+        link.href = finalCanvas.toDataURL('image/png');
+        link.click();
     })();
 }
 
-// ===== AUTO EXTRACT =====
-async function autoExtractFromPdf() {
-    if (!pdfDoc) return;
-    if (!nsNumber || nsNumber.length < 3) { alert('Informe a NS antes de extrair.'); showSidebar('ns_input'); return; }
-    isAutoExtracting = true;
-    $('btn-auto-extract').disabled = true;
-    $('btn-auto-extract').innerHTML = '⏳ Extraindo...';
-
+// ===== HISTÓRICO =====
+async function carregarHistorico() {
     try {
-        const utmProj = `+proj=utm +zone=${utmZone} +south +ellps=WGS84 +datum=WGS84 +units=m +no_defs`;
-        const allNodes = [];
-        for (let p = 1; p <= pdfDoc.numPages; p++) {
-            const page = await pdfDoc.getPage(p);
-            const tc = await page.getTextContent();
-            for (const item of tc.items) {
-                if (!item.str || !item.str.trim()) continue;
-                allNodes.push({ str: item.str.trim(), x: item.transform[4], y: item.transform[5], page: p });
-            }
-        }
+        let url = `${API_URL}/api/projetos`;
+        const de = $('filtro-de').value;
+        const ate = $('filtro-ate').value;
+        const params = [];
+        if (de) params.push(`de=${formatDateBR(de)}`);
+        if (ate) params.push(`ate=${formatDateBR(ate)}`);
+        if (params.length > 0) url += '?' + params.join('&');
 
-        const pxRegex = /^P(\d+)$/i;
-        const pxNodes = [];
-        for (const node of allNodes) {
-            const m = pxRegex.exec(node.str);
-            if (m) pxNodes.push({ num: parseInt(m[1]), x: node.x, y: node.y, page: node.page });
-        }
-
-        const coordNodes = [];
-        const combinedRegex = /(\d{6}[.,]?\d{0,3})[:\s\/\-;](\d{7}[.,]?\d{0,3})/;
-        for (const node of allNodes) {
-            const m = combinedRegex.exec(node.str);
-            if (m) coordNodes.push({ e: m[1].replace(',', '.'), n: m[2].replace(',', '.'), x: node.x, y: node.y, page: node.page });
-        }
-
-        const eRegex = /^(\d{6}[.,]?\d{0,3})$/;
-        const nRegex = /^(\d{7}[.,]?\d{0,3})$/;
-        const eNodes = allNodes.filter(n => eRegex.test(n.str));
-        const nNodes = allNodes.filter(n => nRegex.test(n.str));
-
-        for (const en of eNodes) {
-            let bestN = null, bestDist = 200;
-            for (const nn of nNodes) {
-                if (nn.page !== en.page) continue;
-                const d = Math.sqrt((en.x - nn.x) ** 2 + (en.y - nn.y) ** 2);
-                if (d < bestDist) { bestDist = d; bestN = nn; }
-            }
-            if (bestN) {
-                const ev = en.str.replace(',', '.'), nv = bestN.str.replace(',', '.');
-                if (!coordNodes.some(c => c.e === ev && c.n === nv && c.page === en.page)) {
-                    coordNodes.push({ e: ev, n: nv, x: (en.x + bestN.x) / 2, y: (en.y + bestN.y) / 2, page: en.page });
-                }
-            }
-        }
-
-        if (pxNodes.length === 0 && coordNodes.length === 0) { alert('Nenhum ponto ou coordenada encontrada.'); return; }
-
-        const matched = [];
-        const usedCoords = new Set();
-
-        if (pxNodes.length > 0 && coordNodes.length > 0) {
-            for (const px of pxNodes) {
-                let bestIdx = -1, bestDist = Infinity;
-                for (let i = 0; i < coordNodes.length; i++) {
-                    if (usedCoords.has(i)) continue;
-                    const c = coordNodes[i];
-                    const penalty = c.page === px.page ? 0 : 10000;
-                    const d = Math.sqrt((px.x - c.x) ** 2 + (px.y - c.y) ** 2) + penalty;
-                    if (d < bestDist) { bestDist = d; bestIdx = i; }
-                }
-                if (bestIdx >= 0) {
-                    usedCoords.add(bestIdx);
-                    matched.push({ pNum: px.num, e: coordNodes[bestIdx].e, n: coordNodes[bestIdx].n, pdfX: px.x, pdfY: px.y, pdfPage: px.page });
-                }
-            }
-        } else {
-            coordNodes.forEach((c, i) => matched.push({ pNum: i + 1, e: c.e, n: c.n, pdfX: c.x, pdfY: c.y, pdfPage: c.page }));
-        }
-
-        matched.sort((a, b) => a.pNum - b.pNum);
-
-        const newPoints = [];
-        for (const m of matched) {
-            try {
-                const x = parseFloat(m.e), y = parseFloat(m.n);
-                if (isNaN(x) || isNaN(y)) continue;
-                const [lon, lat] = proj4(utmProj, WGS84, [x, y]);
-                const title = (appMode === 'ambiental' || appMode === 'impedimentos')
-                    ? `P${m.pNum} ${utmZone}k ${m.e}:${m.n}`
-                    : `P${m.pNum} - ${m.e}:${m.n} - NS: ${nsNumber}`;
-                newPoints.push({
-                    id: `auto_${m.pNum}_${Date.now()}`, title, utmE: m.e, utmN: m.n, lat, lon,
-                    zone: `${utmZone}${hemisphere}`, fromFile: pdfFile?.name || 'Auto', isDivisa: false,
-                    pdfPage: m.pdfPage, pdfX: m.pdfX, pdfY: m.pdfY, pointNumber: m.pNum
-                });
-            } catch {}
-        }
-
-        if (newPoints.length === 0) { alert('Coordenadas não puderam ser convertidas. Verifique o Fuso UTM.'); return; }
-
-        approvedPoints = [...approvedPoints, ...newPoints];
-        renderPointsList();
-        updateMap();
-        syncToDatabase();
-        alert(`✅ ${newPoints.length} ponto(s) extraídos!`);
-    } catch (err) { console.error(err); alert('Erro na extração automática.'); }
-    finally {
-        isAutoExtracting = false;
-        $('btn-auto-extract').disabled = false;
-        $('btn-auto-extract').innerHTML = '✨ Extrair Automaticamente';
-    }
+        const token = localStorage.getItem('hub_token');
+        const res = await fetch(url, {
+            headers: { Authorization: 'Bearer ' + token }
+        });
+        if (res.ok) {
+            const data = await res.json();
+            historico = data.projetos || [];
+        } else { historico = []; }
+    } catch (err) { console.warn('⚠️ Backend offline.'); historico = []; }
+    renderizarHistorico();
 }
 
-// ===== EXPORT KML =====
-function exportKML() {
-    const docName = appMode === 'ambiental' ? 'Levantamento Ambiental' : appMode === 'impedimentos' ? 'Levantamento Impedimentos' : `Levantamento NS ${nsNumber}`;
-
-    let kml = `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${docName}</name>`;
-
-    approvedPoints.forEach((p, idx) => {
-        let iconUrl;
-        if (appMode === 'ambiental' || appMode === 'impedimentos') {
-            if (p.isDivisa) iconUrl = 'http://maps.google.com/mapfiles/kml/shapes/shaded_dot.png';
-            else if (isConferencia) iconUrl = 'http://maps.google.com/mapfiles/kml/paddle/ltblu-blank.png';
-            else iconUrl = 'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png';
-        } else {
-            const iconNum = p.pointNumber || (idx + 1);
-            iconUrl = iconNum <= 10 ? `http://maps.google.com/mapfiles/kml/paddle/${iconNum}.png` : 'http://maps.google.com/mapfiles/kml/paddle/wht-blank.png';
-        }
-
-        const desc = (appMode === 'ambiental' || appMode === 'impedimentos')
-            ? `E:${p.utmE} N:${p.utmN}${p.isDivisa ? ' | DIVISA' : ''}`
-            : `NS: ${nsNumber} | E:${p.utmE} N:${p.utmN}`;
-
-        kml += `<Placemark><name>${escXml(p.title)}</name><description>${escXml(desc)}</description><Style><IconStyle><scale>1.1</scale><Icon><href>${iconUrl}</href></Icon></IconStyle></Style><Point><coordinates>${p.lon},${p.lat},0</coordinates></Point></Placemark>`;
-    });
-
-    if (appMode === 'ambiental' && approvedPoints.length >= 2) {
-        const coords = approvedPoints.map(p => `${p.lon},${p.lat},0`).join('\n');
-        kml += `<Placemark><name>Caminho Ambiental</name><Style><LineStyle><color>ff0000ff</color><width>3</width></LineStyle></Style><LineString><tessellate>1</tessellate><coordinates>${coords}</coordinates></LineString></Placemark>`;
-    }
-
-    kml += '</Document></kml>';
-
-    const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = nsNumber ? `NS_${nsNumber}.kml` : `${appMode}_${new Date().toISOString().split('T')[0]}.kml`;
-    document.body.appendChild(link); link.click(); document.body.removeChild(link);
-
-    // Log KML generation
-    authFetch(`${API_URL}/api/kml-log`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ns: nsNumber, modo: appMode, quantidade_pontos: approvedPoints.length })
-    }).catch(() => {});
+function formatDateBR(isoDate) {
+    const [y, m, d] = isoDate.split('-');
+    return `${d}/${m}/${y}`;
 }
 
-function escXml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-
-// ===== SIDEBAR MANAGEMENT =====
-function showSidebar(mode) {
-    sidebarMode = mode;
-    $('ns-panel').classList.add('hidden'); $('ns-panel').style.display = 'none';
-    $('list-panel').classList.add('hidden'); $('list-panel').style.display = 'none';
-    $('edit-panel').classList.add('hidden'); $('edit-panel').style.display = 'none';
-
-    if (mode === 'ns_input') {
-        const isAmb = appMode === 'ambiental', isImp = appMode === 'impedimentos';
-        const panel = $('ns-panel');
-        panel.classList.remove('hidden'); panel.style.display = 'flex';
-        panel.className = 'ns-panel ' + (isAmb ? 'bg-green' : isImp ? 'bg-amber' : 'bg-blue');
-        $('ns-icon').className = 'ns-icon ' + (isAmb ? 'green' : isImp ? 'amber' : 'blue');
-        $('ns-confirm').className = 'ns-confirm ' + (isAmb ? 'green' : isImp ? 'amber' : 'blue');
-        $('ns-input').value = nsNumber;
-        updateNsConfirmBtn();
-        setTimeout(() => $('ns-input').focus(), 100);
-    } else if (mode === 'list') {
-        $('list-panel').classList.remove('hidden'); $('list-panel').style.display = 'flex';
-        renderPointsList();
-        updateMap();
-    } else if (mode === 'point_edit') {
-        $('edit-panel').classList.remove('hidden'); $('edit-panel').style.display = 'flex';
-        populateEditPanel();
-    }
+function filtroHoje() {
+    const today = new Date().toISOString().split('T')[0];
+    $('filtro-de').value = today;
+    $('filtro-ate').value = today;
+    carregarHistorico();
 }
 
-function populateEditPanel() {
-    $('edit-num').value = tempPoint.pointNumber;
-    $('edit-e').value = tempPoint.e;
-    $('edit-n').value = tempPoint.n;
-    $('edit-title').textContent = editPointIndex !== null ? `Editar Ponto #${editPointIndex + 1}` : `Novo Ponto #${approvedPoints.length + 1}`;
-    $('edit-sub').textContent = (appMode === 'ambiental' || appMode === 'impedimentos') ? 'Edite os dados geográficos' : 'Edite os dados do ponto';
-
-    // Title section (pre_projeto only)
-    if (appMode === 'pre_projeto') {
-        $('title-section').classList.remove('hidden');
-        const presets = ['INICIO CONSTRUCAO CABO', 'FINAL CONSTRUCAO CABO', 'INICIO CONVERSAO CABO', 'FINAL CONVERSAO CABO'];
-        $('title-presets').innerHTML = presets.map(t =>
-            `<button class="title-preset${tempPoint.title === t ? ' active' : ''}" onclick="setTitle('${t}')">${t}</button>`
-        ).join('');
-        $('edit-title-input').value = tempPoint.title;
-    } else {
-        $('title-section').classList.add('hidden');
-    }
-
-    // Divisa section
-    if (appMode === 'ambiental' || appMode === 'impedimentos') {
-        $('divisa-section').classList.remove('hidden');
-        $('btn-divisa').className = 'btn-divisa ' + (tempPoint.isDivisa ? 'on' : 'off');
-        $('btn-divisa').innerHTML = tempPoint.isDivisa ? '📍 ✓ DIVISA ATIVA' : '📍 Marcar como Divisa';
-        $('divisa-hint').textContent = tempPoint.isDivisa ? 'Pino será: shaded_dot (divisória)' : 'Pino será: placemark_circle (padrão ambiental)';
-    } else {
-        $('divisa-section').classList.add('hidden');
-    }
-
-    // Preview
-    updateEditPreview();
+function filtroLimpar() {
+    $('filtro-de').value = '';
+    $('filtro-ate').value = '';
+    carregarHistorico();
 }
 
-function setTitle(t) {
-    tempPoint.title = t;
-    if ($('edit-title-input')) $('edit-title-input').value = t;
-    const btns = $('title-presets').querySelectorAll('.title-preset');
-    btns.forEach(b => b.className = 'title-preset' + (b.textContent === t ? ' active' : ''));
-}
-
-function updateEditPreview() {
-    const e = $('edit-e').value || '---';
-    const n = $('edit-n').value || '---';
-    const prev = $('edit-preview-val');
-    if (appMode === 'ambiental' || appMode === 'impedimentos') {
-        prev.className = 'val green';
-        prev.textContent = `${utmZone} k ${e}:${n}`;
-    } else {
-        prev.className = 'val blue';
-        const t = $('edit-title-input') ? $('edit-title-input').value : '---';
-        prev.textContent = `${t || '---'} - ${e}:${n} - NS: ${nsNumber}`;
-    }
-}
-
-// Live preview updates
-document.addEventListener('input', (e) => {
-    if (['edit-e', 'edit-n', 'edit-title-input'].includes(e.target?.id)) updateEditPreview();
-});
-
-// ===== RENDER POINTS LIST =====
-function renderPointsList() {
-    const list = $('points-list');
-    $('points-count').textContent = approvedPoints.length;
-    $('btn-export').disabled = approvedPoints.length === 0;
-
-    if (approvedPoints.length === 0) {
-        list.innerHTML = '<div class="points-empty">Lista Vazia</div>';
-        $('map-section').classList.add('hidden');
+function renderizarHistorico() {
+    const list = $('hist-list');
+    if (historico.length === 0) {
+        list.innerHTML = '<div class="hist-empty">Nenhum projeto salvo</div>';
         return;
     }
 
-    $('map-section').classList.remove('hidden');
-    const isAmb = appMode === 'ambiental' || appMode === 'impedimentos';
+    list.innerHTML = historico.map(proj => {
+        const cats = (proj.categorias_globais || []).map(c => `<span class="hist-tag cat">${c}</span>`).join('');
+        const topoTag = proj.topografo ? `<span class="hist-tag top">${proj.topografo}</span>` : '';
+        const ambTag = proj.ambiental === 'SIM' ? '<span class="hist-tag amb">AMB ✓</span>' : '';
+        const servTag = proj.servidao ? `<span class="hist-tag ser">${proj.servidao}</span>` : '';
+        const kmTag = parseFloat(proj.km_valor) > 0 ? `<span class="hist-tag km">KM ${fmtVal(parseFloat(proj.km_valor))}</span>` : '';
+        const postesArr = proj.postes || [];
+        const total = parseFloat(proj.total) || 0;
 
-    list.innerHTML = approvedPoints.map((p, idx) => {
-        const numClass = p.isDivisa ? 'divisa' : (isAmb ? 'green' : 'blue');
-        const cardClass = p.isDivisa ? 'point-card divisa' : 'point-card';
-        const numLabel = p.isDivisa ? 'D' : (p.pointNumber || (idx + 1));
-        return `<div class="${cardClass}" onclick="highlightPoint(approvedPoints[${idx}])">
-            <div class="point-num ${numClass}">${numLabel}</div>
-            <div class="point-info">
-                <div class="point-title">${escHtml(p.title)}</div>
-                <div class="point-coords">E: ${p.utmE} N: ${p.utmN}${p.isDivisa ? '<span class="point-divisa">DIVISA</span>' : ''}</div>
-                ${p.pdfPage ? `<div class="point-page">📄 Pág. ${p.pdfPage}</div>` : ''}
+        return `<div class="hist-item">
+            <div>
+                <div class="hist-ns">NS: ${proj.ns}</div>
+                <div class="hist-meta">${postesArr.length} ITENS • ${proj.data_registro}</div>
+                <div class="hist-tags">${cats}${topoTag}${ambTag}${servTag}${kmTag}</div>
             </div>
-            <button class="point-btn edit" onclick="event.stopPropagation();handleEditPoint(${idx})" title="Editar">✏️</button>
-            <button class="point-btn del" onclick="event.stopPropagation();handleDeletePoint(${idx})" title="Excluir">🗑</button>
+            <div style="text-align:right">
+                <div class="hist-total">US ${fmtVal(total)}</div>
+            </div>
+            <button class="hist-del" onclick="apagarProjeto(${proj.id})">🗑</button>
         </div>`;
     }).join('');
 }
 
-function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-// ===== MAP =====
-function toggleMap() {
-    showMapFlag = !showMapFlag;
-    $('map-toggle-text').textContent = showMapFlag ? 'Ocultar Mapa' : 'Mostrar Mapa';
-    const mc = $('map-container');
-    if (showMapFlag) { mc.classList.remove('hidden'); initMap(); updateMap(); }
-    else { mc.classList.add('hidden'); }
-}
-
-function initMap() {
-    if (mapInstance) return;
-    mapInstance = L.map('map-container', { center: [-19.92, -43.94], zoom: 12, zoomControl: true, attributionControl: false });
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }).addTo(mapInstance);
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }).addTo(mapInstance);
-    markersLayer = L.layerGroup().addTo(mapInstance);
-    setTimeout(() => mapInstance.invalidateSize(), 200);
-}
-
-function updateMap() {
-    if (!mapInstance || !markersLayer) return;
-    markersLayer.clearLayers();
-    if (polylineLayer) { mapInstance.removeLayer(polylineLayer); polylineLayer = null; }
-    if (approvedPoints.length === 0) return;
-
-    const latLngs = [];
-    approvedPoints.forEach((p, idx) => {
-        if (!p.lat || !p.lon) return;
-        const ll = L.latLng(p.lat, p.lon);
-        latLngs.push(ll);
-
-        let color = '#3b82f6';
-        if (appMode === 'ambiental') color = '#10b981';
-        if (appMode === 'impedimentos') color = '#f59e0b';
-        if (p.isDivisa) color = '#f97316';
-
-        L.circleMarker(ll, { radius: 8, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.9 })
-            .bindTooltip(`${p.isDivisa ? 'D - Divisa' : '#' + (p.pointNumber || idx + 1)}<br/><small>E:${p.utmE} N:${p.utmN}</small>`, { direction: 'top', offset: [0, -8] })
-            .addTo(markersLayer);
-
-        const numIcon = L.divIcon({
-            className: '', iconSize: [18, 18], iconAnchor: [9, 9],
-            html: `<span style="display:flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;background:${color};color:white;font-size:10px;font-weight:800;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4);pointer-events:none">${p.isDivisa ? 'D' : (p.pointNumber || idx + 1)}</span>`
+async function apagarProjeto(id) {
+    const token = localStorage.getItem('hub_token');
+    try {
+        const res = await fetch(`${API_URL}/api/projetos/${id}`, {
+            method: 'DELETE',
+            headers: { Authorization: 'Bearer ' + token }
         });
-        L.marker(ll, { icon: numIcon, interactive: false }).addTo(markersLayer);
+        if (res.ok) mostrarFeedback('✅ Projeto removido.', 'sucesso');
+        else mostrarFeedback('❌ Erro ao remover projeto.', 'erro');
+    } catch {
+        mostrarFeedback('❌ Backend offline.', 'erro');
+    }
+    carregarHistorico();
+}
+
+// ===== EXPORT EXCEL =====
+function exportarExcel() {
+    if (typeof XLSX === 'undefined') { alert('Carregando módulo Excel...'); return; }
+    if (historico.length === 0) { alert('Nenhum projeto para exportar.'); return; }
+
+    const dados = historico.map(h => ({
+        "NS": h.ns,
+        "Data": h.data_registro,
+        "Topógrafo": h.topografo || '',
+        "Ambiental": h.ambiental || 'NÃO',
+        "Servidão": h.servidao || '',
+        "Itens": (h.postes || []).length,
+        "KM (US)": fmtVal(parseFloat(h.km_valor) || 0),
+        "Total (US)": fmtVal(parseFloat(h.total) || 0),
+        "Categorias": (h.categorias_globais || []).join(', ') || 'Nenhuma'
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(dados);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Relatório");
+    XLSX.writeFile(wb, "Levantamento_ProEng.xlsx");
+}
+
+// ===== RELATÓRIO 7 DIAS =====
+async function gerarRelatorio7Dias() {
+    let allProjects = [];
+    try {
+        const token = localStorage.getItem('hub_token');
+        const res = await fetch(`${API_URL}/api/projetos`, {
+            headers: { Authorization: 'Bearer ' + token }
+        });
+        if (res.ok) { const d = await res.json(); allProjects = d.projetos || []; }
+    } catch { alert('Backend offline.'); return; }
+
+    const today = new Date();
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        days.push(d.toLocaleDateString('pt-BR'));
+    }
+
+    const data = {};
+    TOPOGRAFOS.forEach(t => {
+        data[t] = {};
+        days.forEach(d => data[t][d] = 0);
     });
 
-    if (appMode === 'ambiental' && latLngs.length >= 2) {
-        polylineLayer = L.polyline(latLngs, { color: '#ef4444', weight: 3, opacity: 0.8, dashArray: '8, 6' }).addTo(mapInstance);
-    }
+    allProjects.forEach(p => {
+        const topo = p.topografo || '';
+        const dateStr = p.data_registro;
+        if (topo && data[topo] && days.includes(dateStr)) {
+            data[topo][dateStr] += 1;
+        }
+    });
 
-    if (latLngs.length === 1) mapInstance.setView(latLngs[0], 16);
-    else if (latLngs.length > 1) mapInstance.fitBounds(L.latLngBounds(latLngs), { padding: [30, 30], maxZoom: 17 });
+    let html = `<table><caption>Relatório 7 Dias — ${days[0]} a ${days[6]}</caption><tr><th>Topógrafo</th>`;
+    days.forEach(d => html += `<th>${d}</th>`);
+    html += '<th>TOTAL</th></tr>';
+
+    TOPOGRAFOS.forEach(t => {
+        html += `<tr><td style="text-align:left;font-weight:700">${t}</td>`;
+        let rowTotal = 0;
+        days.forEach(d => {
+            const v = data[t][d];
+            rowTotal += v;
+            html += `<td>${v || ''}</td>`;
+        });
+        html += `<td class="total-cell">${rowTotal}</td></tr>`;
+    });
+
+    html += '<tr><td class="total-cell">TOTAL</td>';
+    let grandTotal = 0;
+    days.forEach(d => {
+        let colTotal = 0;
+        TOPOGRAFOS.forEach(t => colTotal += data[t][d]);
+        grandTotal += colTotal;
+        html += `<td class="total-cell">${colTotal || ''}</td>`;
+    });
+    html += `<td class="total-cell" style="background:#1e293b;color:#fff">${grandTotal}</td></tr></table>`;
+
+    $('rel7-container').innerHTML = html;
+
+    setTimeout(async () => {
+        try {
+            const canvas = await html2canvas($('rel7-container'), { scale: 2, backgroundColor: '#ffffff' });
+            const link = document.createElement('a');
+            link.download = 'Relatorio_7Dias.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        } catch (err) { alert('Erro ao gerar relatório.'); console.error(err); }
+    }, 300);
 }
 
-function destroyMap() {
-    if (mapInstance) { mapInstance.remove(); mapInstance = null; markersLayer = null; polylineLayer = null; }
-    showMapFlag = false;
+// ===== UTILS =====
+function readFileAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsArrayBuffer(file);
+    });
+}
+function readFileAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsDataURL(file);
+    });
+}
+function getImageDimensions(dataUrl) {
+    return new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.src = dataUrl;
+    });
 }
 
-// ===== RESET PROJETO =====
-function resetProjeto() {
-    if (approvedPoints.length > 0) {
-        const ok = confirm('Deseja iniciar um novo projeto?\nOs pontos atuais já estão salvos no banco.');
-        if (!ok) return;
-    }
-    nsNumber = '';
-    approvedPoints = [];
-    editPointIndex = null;
-    pdfFile = null; pdfDoc = null;
-    pageNum = 1; totalPages = 0;
-    $('ns-input').value = '';
-    $('ns-hdr-badge').classList.add('hidden');
-    $('btn-reset').classList.add('hidden');
-    $('ns-cross-mode-warning').classList.add('hidden');
-    $('pdf-wrapper').classList.add('hidden');
-    $('upload-center').classList.remove('hidden');
-    $('selection-toggle').classList.add('hidden');
-    $('add-pdf-btn').classList.add('hidden');
-    $('page-controls').classList.add('hidden');
-
-    // Reset file inputs
-    const mainInput = $('main-upload-btn')?.querySelector('input');
-    if (mainInput) mainInput.value = '';
-    const addInput = $('add-pdf-btn')?.querySelector('input');
-    if (addInput) addInput.value = '';
-
-    destroyMap();
-    showSidebar('ns_input');
-}
+// ===== START =====
+init();
