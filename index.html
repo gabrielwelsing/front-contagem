@@ -153,7 +153,7 @@
 <!-- CATRACA: roda antes de renderizar qualquer coisa -->
 <script>
     (async function () {
-        const HUB_URL = 'https://www.sup-ia.com';
+        const HUB_URL = 'https://www.hub.sup-ia.com';
         const BACKEND = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
             ? 'http://localhost:3001'
             : 'https://back-contagem-production.up.railway.app';
@@ -195,7 +195,7 @@
         </div>
     </div>
     <div class="hdr-right">
-        <button class="btn-portal" onclick="window.location.href='https://www.sup-ia.com'">Voltar ao Portal</button>
+        <button class="btn-portal" onclick="window.location.href='https://www.hub.sup-ia.com'">Voltar ao Portal</button>
         <button id="btn-voltar" class="btn-voltar hidden" onclick="voltarUpload()">← VOLTAR</button>
         <button id="btn-salvar" class="btn-salvar hidden" onclick="salvarProjeto()">⬇ SALVAR (UNIFICADO)</button>
     </div>
