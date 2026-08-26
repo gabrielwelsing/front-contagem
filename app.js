@@ -874,7 +874,7 @@ async function gerarRelatorio7Dias() {
     });
     html += `<td class="total-cell" style="background:#1e293b;color:#fff">${grandTotal}</td></tr></table>`;
 
-    const semanasFechadas = getUltimas4SemanasFechadas(today);
+    const semanasFechadas = getUltimas4SemanasFechadas(today).reverse();
 
     const totaisSemanais = semanasFechadas.map(semana => {
         const totalSemana = allProjects.filter(proj => {
