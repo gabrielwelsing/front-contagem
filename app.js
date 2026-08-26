@@ -874,17 +874,135 @@ async function gerarRelatorio7Dias() {
     });
     html += `<td class="total-cell" style="background:#1e293b;color:#fff">${grandTotal}</td></tr></table>`;
 
+    const semanasFechadas = getUltimas4SemanasFechadas(today);
+
+    const totaisSemanais = semanasFechadas.map(semana => {
+        const totalSemana = allProjects.filter(proj => {
+            const dataProjeto = parseDateBRToDate(proj.data_registro);
+
+            return dataProjeto &&
+                   dataProjeto >= semana.inicio &&
+                   dataProjeto <= semana.fim;
+        }).length;
+
+        return {
+            rotulo: `Semana (${formatDateShortDot(semana.fim)})`,
+            total: totalSemana
+        };
+    });
+
+    html += `
+        <table style="margin-top:12px;">
+            <caption>Totais das Últimas 4 Semanas (Seg a Sex)</caption>
+            <tr>
+                ${totaisSemanais.map(s => `<th>${s.rotulo}</th>`).join('')}
+            </tr>
+            <tr>
+                ${totaisSemanais.map(s => `<td class="total-cell" style="font-size:14px">${s.total}</td>`).join('')}
+            </tr>
+        </table>
+    `;
+
     $('rel7-container').innerHTML = html;
 
     setTimeout(async () => {
         try {
-            const canvas = await html2canvas($('rel7-container'), { scale: 2, backgroundColor: '#ffffff' });
+            const canvas = await html2canvas($('rel7-container'), {
+                scale: 2,
+                backgroundColor: '#ffffff'
+            });
+
             const link = document.createElement('a');
             link.download = 'Relatorio_7Dias.png';
             link.href = canvas.toDataURL('image/png');
             link.click();
-        } catch (err) { alert('Erro ao gerar relatório.'); console.error(err); }
+
+        } catch (err) {
+            alert('Erro ao gerar relatório.');
+            console.error(err);
+        }
     }, 300);
+}
+
+function parseDateBRToDate(dateStr) {
+    if (!dateStr || typeof dateStr !== 'string') return null;
+
+    const [dia, mes, ano] = dateStr.split('/').map(Number);
+
+    if (!dia || !mes || !ano) return null;
+
+    const data = new Date(
+        ano,
+        mes - 1,
+        dia
+    );
+
+    data.setHours(0, 0, 0, 0);
+
+    return isNaN(data.getTime()) ? null : data;
+}
+
+function formatDateShortDot(date) {
+    const dia = String(date.getDate()).padStart(2, '0');
+    const mes = String(date.getMonth() + 1).padStart(2, '0');
+
+    return `${dia}.${mes}`;
+}
+
+function getLastClosedFriday(baseDate = new Date()) {
+    const data = new Date(baseDate);
+
+    data.setHours(0, 0, 0, 0);
+
+    const diaSemana = data.getDay();
+
+    let diasParaVoltar;
+
+    if (diaSemana === 6) {
+        diasParaVoltar = 1;
+    } else if (diaSemana === 0) {
+        diasParaVoltar = 2;
+    } else {
+        diasParaVoltar = diaSemana + 2;
+    }
+
+    data.setDate(
+        data.getDate() - diasParaVoltar
+    );
+
+    return data;
+}
+
+function getUltimas4SemanasFechadas(baseDate = new Date()) {
+    const ultimaSexta = getLastClosedFriday(baseDate);
+
+    const semanas = [];
+
+    for (let i = 0; i < 4; i++) {
+
+        const fim = new Date(ultimaSexta);
+
+        fim.setDate(
+            ultimaSexta.getDate() - (i * 7)
+        );
+
+        fim.setHours(0, 0, 0, 0);
+
+        const inicio = new Date(fim);
+
+        inicio.setDate(
+            fim.getDate() - 4
+        );
+
+        inicio.setHours(0, 0, 0, 0);
+
+        semanas.push({
+            inicio,
+            fim
+        });
+    }
+
+    return semanas;
 }
 
 // ===== UTILS =====
@@ -896,6 +1014,7 @@ function readFileAsArrayBuffer(file) {
         r.readAsArrayBuffer(file);
     });
 }
+
 function readFileAsDataURL(file) {
     return new Promise((resolve, reject) => {
         const r = new FileReader();
@@ -904,10 +1023,14 @@ function readFileAsDataURL(file) {
         r.readAsDataURL(file);
     });
 }
+
 function getImageDimensions(dataUrl) {
     return new Promise(resolve => {
         const img = new Image();
-        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onload = () => resolve({
+            w: img.naturalWidth,
+            h: img.naturalHeight
+        });
         img.src = dataUrl;
     });
 }
