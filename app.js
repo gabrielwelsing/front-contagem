@@ -893,7 +893,7 @@ async function gerarRelatorio7Dias() {
 
     html += `
         <table style="margin-top:12px;">
-            <caption>Totais das Últimas 4 Semanas (Seg a Sex)</caption>
+            <caption>Totais das Últimas 8 Semanas (Seg a Sex)</caption>
             <tr>
                 ${totaisSemanais.map(s => `<th>${s.rotulo}</th>`).join('')}
             </tr>
@@ -978,7 +978,7 @@ function getUltimas4SemanasFechadas(baseDate = new Date()) {
 
     const semanas = [];
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
 
         const fim = new Date(ultimaSexta);
 
